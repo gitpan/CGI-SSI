@@ -3,3 +3,5 @@ MANIFEST
 Makefile.PL
 SSI.pm
 test.pl
+README
+INSTALL
