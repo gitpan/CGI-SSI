@@ -1,6 +1,42 @@
 Revision history for Perl extension CGI::SSI.
 
-0.01  Fri Mar 30 15:32:19 2001
-	- original version; created by h2xs 1.20 with options
-		-A -X CGI::SSI
+0.53  Wed Mar 14 10:07:43 2001
+        - added printf support for tied filehandles
+
+0.52  Mon Feb 26 11:03:24 2001
+        - fixed $HTML::SimpleParse::FIX_CASE issue
+
+0.51  Mon Feb 05 23:28:34 2001
+        - corrected the test suite
+
+0.50  Mon Dec 18 15:02:37 2000
+        - include test suite
+        - remove cumbersome features (see 0.14)
+        - better documentation
+
+0.14  Fri Aug 18 11:55:23 2000
+        - allow $ENV{QUERY_STRING} and 
+                $ENV{QUERY_STRING_UNESCAPED} to be 
+                visible from virtually-included 
+                documents. The query string is passed
+                in as usual : "/file?query".
+
+0.13  Tue Aug 08 15:46:25 2000
+        - allow for upper-case arguments, require
+                Date::Parse instead of Date::Format,
+                process all included files, add
+                documentation for the fact that 
+                DOCUMENT_ROOT is a valid parameter
+                to import() or new().
+
+0.11  Tue Jun 06 01:05:48 2000
+        - name required pm files in Makefile.PL to
+                allow for easy install via CPAN.pm
+
+0.10  Thu May 18 12:01:02 2000
+	- various bug fixes; a total overhaul, as a
+		matter of fact.
+
+0.01  Fri Jan 14 21:45:28 2000
+	- original version; created by h2xs 1.19
 
