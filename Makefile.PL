@@ -10,6 +10,6 @@ WriteMakefile(
                          File::Spec        => 0,
                          LWP::Simple       => 0,
                          URI               => 0,
-                         Date::Format      => 0,
+                         Date::Parse       => 0,
                       },
 );

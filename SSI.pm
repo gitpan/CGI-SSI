@@ -8,7 +8,7 @@ use LWP::Simple;
 use URI;
 use Date::Format;
 
-$CGI::SSI::VERSION = '0.11';
+$CGI::SSI::VERSION = '0.13';
 
 my $debug = 0;
 
@@ -38,12 +38,14 @@ sub new {
 	($script_name) = $ENV{'SCRIPT_NAME'} =~ /([^\/]+)$/;
     }
 
+    $ENV{'DOCUMENT_ROOT'} ||= '';
     $self->{'_variables'}     = {
         DOCUMENT_URI    =>  ($args{'DOCUMENT_URI'} || $ENV{'SCRIPT_NAME'}),
         DATE_GMT        =>  $gmt,
         DATE_LOCAL      =>  $loc,
         LAST_MODIFIED   =>  $self->flastmod('file', $ENV{'SCRIPT_FILENAME'} || $ENV{'PATH_TRANSLATED'} || ''),
         DOCUMENT_NAME   =>  ($args{'DOCUMENT_NAME'} || $script_name),
+	DOCUMENT_ROOT   =>  ($args{'DOCUMENT_ROOT'} || $ENV{DOCUMENT_ROOT}),
                                 };
 
     $self->{'_config'}        = {
@@ -112,7 +114,7 @@ sub _interp_vars {
     return $text;
 }
 
-# for internal use only
+# for internal use only - returns the thing passed in if it's not defined. echo() returns '' in that case.
 sub _echo {
     my($self,$key,$var) = @_;
     $var = $key if @_ == 2;
@@ -127,12 +129,16 @@ sub _echo {
 
 sub config {
     my($self,%args) = @_;
+    for my $key (keys %args) {
+	$args{lc $key} = $args{$key};
+	delete $args{$key} unless $key eq lc $key;
+    }
     if(exists $args{'timefmt'}) {
 	$self->{'_config'}->{'timefmt'} = $args{'timefmt'};
     } elsif(exists $args{'sizefmt'}) {
-	if($args{'sizefmt'} eq 'abbrev') {
+	if(lc $args{'sizefmt'} eq 'abbrev') {
 	    $self->{'_config'}->{'sizefmt'} = 'abbrev';
-	} elsif($args{'sizefmt'} eq 'bytes') {
+	} elsif(lc $args{'sizefmt'} eq 'bytes') {
 	    $self->{'_config'}->{'sizefmt'} = 'bytes';
 	} else {
 	    return $self->{'_config'}->{'errmsg'};
@@ -147,6 +153,10 @@ sub config {
 
 sub set {
     my($self,%args) = @_;
+    for my $key (keys %args) {
+	$args{lc $key} = $args{$key};
+	delete $args{$key} unless $key eq lc $key;
+    }
     if(scalar keys %args > 1) {
 	$self->{'_variables'}->{$args{'var'}} = $args{'value'};
     } else { # var => value notation
@@ -170,9 +180,9 @@ sub printenv {
 
 sub include {
     my($self,$type,$filename) = @_;
-    if($type eq 'file') {
+    if(lc $type eq 'file') {
 	return $self->_include_file($filename);
-    } elsif($type eq 'virtual') {
+    } elsif(lc $type eq 'virtual') {
 	return $self->_include_virtual($filename);
     } else {
 	return $self->{'_config'}->{'errmsg'};
@@ -184,11 +194,14 @@ sub _include_file {
     $filename = File::Spec->catfile($FindBin::Bin,$filename) unless -e $filename;
     my $fh = do { local *STDIN };
     open($fh,$filename) or return $self->{'_config'}->{'errmsg'};
-    return join '',<$fh>;
+    return $self->process(join '',<$fh>);
 }
 
 sub _include_virtual {
     my($self,$filename) = @_;
+    if($filename =~ m|^/|) { # this is on the local server
+	return $self->_include_file($self->{'_variables'}->{'DOCUMENT_ROOT'}.$filename);
+    }
     my $response = undef;
     eval {
 	my $uri = URI->new($filename);
@@ -198,14 +211,14 @@ sub _include_virtual {
     };
     return $self->{'_config'}->{'errmsg'} if $@;
     return $self->{'_config'}->{'errmsg'} unless defined $response;
-    return $response;
+    return $self->process($response);
 }
 
 sub exec {
     my($self,$type,$filename) = @_;
-    if($type eq 'cmd') {
+    if(lc $type eq 'cmd') {
 	return $self->_exec_cmd($filename);
-    } elsif($type eq 'cgi') {
+    } elsif(lc $type eq 'cgi') {
 	return $self->_exec_cgi($filename);
     } else {
 	return $self->{'_config'}->{'errmsg'};
@@ -216,7 +229,7 @@ sub _exec_cmd {
     my($self,$filename) = @_;
     my $output = `$filename`; # security here is mighty bad.
     return $self->{'_config'}->{'errmsg'} if $?;
-    return $output;
+    return $self->process($output);
 }
 
 sub _exec_cgi { # no relative $filename allowed.
@@ -231,16 +244,17 @@ sub _exec_cgi { # no relative $filename allowed.
     };
     return $self->{'_config'}->{'errmsg'} if $@;
     return $self->{'_config'}->{'errmsg'} unless defined $response;
-    return $response;
+    return $self->process($response);
 }
 
 sub flastmod {
     my($self,$type,$filename) = @_;
 
-    if($type eq 'file') {
+    if(lc $type eq 'file') {
 	$filename = File::Spec->catfile($FindBin::Bin,$filename) unless -e $filename;
-    } elsif($type eq 'virtual') {
-	$filename = File::Spec->catfile($ENV{'DOCUMENT_ROOT'},$filename) unless $filename =~ /$ENV{'DOCUMENT_ROOT'}/;
+    } elsif(lc $type eq 'virtual') {
+	$filename = File::Spec->catfile($self->{'_variables'}->{'DOCUMENT_ROOT'},$filename)
+	    unless $filename =~ /$self->{'_variables'}->{'DOCUMENT_ROOT'}/;
     } else {
 	return $self->{'_config'}->{'errmsg'};
     }
@@ -259,10 +273,9 @@ sub flastmod {
 sub fsize {
     my($self,$type,$filename) = @_;
 
-    if($type eq 'file') {
+    if(lc $type eq 'file') {
 	$filename = File::Spec->catfile($FindBin::Bin,$filename) unless -e $filename;
-    } elsif($type eq 'virtual') {
-	$ENV{'DOCUMENT_ROOT'} ||= '';
+    } elsif(lc $type eq 'virtual') {
 	$filename = File::Spec->catfile($ENV{'DOCUMENT_ROOT'},$filename) unless $filename =~ /$ENV{'DOCUMENT_ROOT'}/;
     } else {
 	return $self->{'_config'}->{'errmsg'};
@@ -271,7 +284,7 @@ sub fsize {
 
     my $fsize = (stat $filename)[7];
     
-    if($self->{'_config'}->{'sizefmt'} eq 'bytes') {
+    if(lc $self->{'_config'}->{'sizefmt'} eq 'bytes') {
 	1 while $fsize =~ s/^(\d+)(\d{3})/$1,$2/g;
 	return $fsize;
     } else { # abbrev
@@ -407,7 +420,7 @@ __END__
 
 =head1 SYNOPSIS
 
- #autotie STDOUT or any other open filehandle
+ # autotie STDOUT or any other open filehandle
 
    use CGI::SSI (autotie => STDOUT);
 
@@ -523,6 +536,7 @@ Creates a new CGI::SSI object. The following are valid (optional) arguments:
 
  DOCUMENT_URI    => $doc_uri,
  DOCUMENT_NAME   => $doc_name,
+ DOCUMENT_ROOT   => $doc_root,
  errmsg          => $oops,
  sizefmt         => ('bytes' || 'abbrev'),
  timefmt         => $time_fmt,
