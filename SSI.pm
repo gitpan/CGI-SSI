@@ -8,7 +8,7 @@ use LWP::Simple;
 use URI;
 use Date::Format;
 
-$CGI::SSI::VERSION = '0.10';
+$CGI::SSI::VERSION = '0.11';
 
 my $debug = 0;
 
@@ -80,7 +80,6 @@ sub PRINT {
 
 sub process {
     my($self,@shtml) = @_;
-    print main::STDERR "###processing:\n",join("\n",@shtml),"\n" if $debug;
     my $processed = '';
     @shtml = split(/(<!--#.+?-->)/,join '',@shtml);
     for my $token (@shtml) {
@@ -100,7 +99,6 @@ sub _process_ssi_text {
     return '' if($self->_suspended and $text !~ /^(?:if|else|elif|endif)\b/);
     return $self->{'_config'}->{'errmsg'} unless $text =~ s/^(\S+)\s*//;
     my $method = $1;
-    print main::STDERR "###calling $method($text)\n" if $debug;
     return $self->$method( HTML::SimpleParse->parse_args($text) );
 }
 
@@ -293,8 +291,6 @@ sub fsize {
 sub _test {
     my($self,$test) = @_;
     my $retval = eval($test);
-    print main::STDERR "###the test ($test) was true.\n"  if $debug and $retval;
-    print main::STDERR "###the test ($test) was false.\n" if $debug and not $retval;
     return undef if $@;
     return defined $retval ? $retval : 0;
 }
@@ -344,7 +340,6 @@ sub _in_if {
 
 sub if {
     my($self,$expr,$test) = @_;
-    print main::STDERR "###entering if()\n" if $debug;
     $expr = $test if @_ == 3;
     $self->_entering_if();
     if($self->_test($expr)) {
@@ -352,14 +347,12 @@ sub if {
     } else {
 	$self->_suspend();
     }
-    print main::STDERR "###leaving if(), and we're ".($self->_suspended() ? "":"not ")."suspended.\n" if $debug;
     return '';
 }
 
 sub elif {
     my($self,$expr,$test) = @_;
     die "Incorrect use of elif ssi directive: no preceeding 'if'." unless $self->_in_if();
-    print main::STDERR "###entering elif()\n" if $debug;
     $expr = $test if @_ == 3;
     if(! $self->_seen_true() and $self->_test($expr)) {
 	$self->_true();
@@ -367,30 +360,25 @@ sub elif {
     } else {
 	$self->_suspend() unless $self->_suspended();
     }
-    print main::STDERR "###leaving elif(), and we're ".($self->_suspended() ? "":"not ")."suspended.\n" if $debug;
     return '';
 }
 
 sub else {
     my $self = shift;
     die "Incorrect use of else ssi directive: no preceeding 'if'." unless $self->_in_if();
-    print main::STDERR "###entering else()\n" if $debug;
     unless($self->_seen_true()) {
 	$self->_resume();
     } else {
 	$self->_suspend();
     }
-    print main::STDERR "###leaving else(), and we're ".($self->_suspended() ? "":"not ")."suspended.\n" if $debug;
     return '';
 }
 
 sub endif {
     my $self = shift;
     die "Incorrect use of endif ssi directive: no preceeding 'if'." unless $self->_in_if();
-    print main::STDERR "###entering endif()\n" if $debug;
     $self->_leaving_if();
     $self->_resume() if $self->_suspended();
-    print main::STDERR "###leaving endif(), and we're ".($self->_suspended() ? "":"not ")."suspended.\n" if $debug;
     return '';
 }
 

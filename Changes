@@ -6,3 +6,7 @@ Revision history for Perl extension CGI::SSI.
 0.10  Thu May 18 12:01:02 2000
 	- various bug fixes; a total overhaul, as a
 		matter of fact.
+
+0.11  Tue Jun 06 01:05:48 2000
+        - name required pm files in Makefile.PL to
+                allow for easy install via CPAN.pm
