@@ -1,7 +1,7 @@
 use strict;
 use warnings FATAL => 'all';
 
-use Test::More tests => 20;
+use Test::More tests => 21;
 
 use_ok('CGI::SSI');
 
@@ -205,6 +205,13 @@ use_ok('CGI::SSI');
     my $html = $echo->process(q[<!--#set var="varname" value="foo" --><!--#echo var="varname" -->]);
     ok($html eq "FOO",'inherit 2');
 }
+
+# DATE_LOCAL/DATE_GMT with config{timefmt}
+{
+    my $ssi = new CGI::SSI (timefmt => '%Y');
+    ok($ssi->echo('DATE_LOCAL') =~ /^\d{4}$/,'config{timefmt}');
+}
+
 
 # autotie ?
 # tie by hand

@@ -2,21 +2,16 @@ package CGI::SSI;
 use strict;
 
 use HTML::SimpleParse;
-use File::Spec;
+use File::Spec::Functions; # catfile()
 use FindBin;
 use LWP::Simple;
 use URI;
 use Date::Format;
+use Tie::Scalar;
 
-$CGI::SSI::VERSION = '0.81';
+$CGI::SSI::VERSION = '0.82';
 
 my $debug = 0;
-
-######### tie some vars for ease and precision
-my($gmt,$loc);
-tie $gmt,'CGI::SSI::Gmt';
-tie $loc,'CGI::SSI::Local';
-#########
 
 sub import {
     my($class,%args) = @_;
@@ -26,6 +21,8 @@ sub import {
     my $self = tie(*{$args{'filehandle'}},$class,%args);
     return $self;
 }
+
+my($gmt,$loc);
 
 sub new {
     my($class,%args) = @_;
@@ -37,6 +34,9 @@ sub new {
     if(exists $ENV{'SCRIPT_NAME'}) {
 	($script_name) = $ENV{'SCRIPT_NAME'} =~ /([^\/]+)$/;
     }
+
+    tie $gmt, 'CGI::SSI::Gmt', $self;
+    tie $loc, 'CGI::SSI::Local', $self;
 
     $ENV{'DOCUMENT_ROOT'} ||= '';
     $self->{'_variables'}     = {
@@ -125,6 +125,13 @@ sub _interp_vars {
 sub _echo {
     my($self,$key,$var) = @_;
     $var = $key if @_ == 2;
+
+    if($var eq 'DATE_LOCAL') {
+	return $loc;
+    } elsif($var eq 'DATE_GMT') {
+	return $gmt;
+    }
+
     return $self->{'_variables'}->{$var} if exists $self->{'_variables'}->{$var};
     return $ENV{$var} if exists $ENV{$var};
     return $var;
@@ -168,6 +175,13 @@ sub set {
 sub echo {
     my($self,$key,$var) = @_;
     $var = $key if @_ == 2;
+
+    if($var eq 'DATE_LOCAL') {
+	return $loc;
+    } elsif($var eq 'DATE_GMT') {
+	return $gmt;
+    }
+
     return $self->{'_variables'}->{$var} if exists $self->{'_variables'}->{$var};
     return $ENV{$var} if exists $ENV{$var};
     return '';
@@ -191,7 +205,7 @@ sub include {
 
 sub _include_file {
     my($self,$filename) = @_;
-    $filename = File::Spec->catfile($FindBin::Bin,$filename) unless -e $filename;
+    $filename = catfile($FindBin::Bin,$filename) unless -e $filename;
     my $fh = do { local *STDIN };
     open($fh,$filename) or return $self->{'_config'}->{'errmsg'};
     return $self->process(join '',<$fh>);
@@ -266,9 +280,9 @@ sub flastmod {
     my($self,$type,$filename) = @_;
 
     if(lc $type eq 'file') {
-	$filename = File::Spec->catfile($FindBin::Bin,$filename) unless -e $filename;
+	$filename = catfile($FindBin::Bin,$filename) unless -e $filename;
     } elsif(lc $type eq 'virtual') {
-	$filename = File::Spec->catfile($self->{'_variables'}->{'DOCUMENT_ROOT'},$filename)
+	$filename = catfile($self->{'_variables'}->{'DOCUMENT_ROOT'},$filename)
 	    unless $filename =~ /$self->{'_variables'}->{'DOCUMENT_ROOT'}/;
     } else {
 	return $self->{'_config'}->{'errmsg'};
@@ -289,9 +303,9 @@ sub fsize {
     my($self,$type,$filename) = @_;
 
     if(lc $type eq 'file') {
-	$filename = File::Spec->catfile($FindBin::Bin,$filename) unless -e $filename;
+	$filename = catfile($FindBin::Bin,$filename) unless -e $filename;
     } elsif(lc $type eq 'virtual') {
-	$filename = File::Spec->catfile($ENV{'DOCUMENT_ROOT'},$filename) unless $filename =~ /$ENV{'DOCUMENT_ROOT'}/;
+	$filename = catfile($ENV{'DOCUMENT_ROOT'},$filename) unless $filename =~ /$ENV{'DOCUMENT_ROOT'}/;
     } else {
 	return $self->{'_config'}->{'errmsg'};
     }
@@ -416,13 +430,29 @@ sub endif {
 
 package CGI::SSI::Gmt;
 
-sub TIESCALAR { bless {},$_[0] }
-sub FETCH { gmtime() }
+sub TIESCALAR { bless [@_], shift() }
+sub FETCH {
+    my $self = shift;
+    if($self->[-1]->{'_config'}->{'timefmt'}) {
+	my @gt = gmtime;
+	return Date::Format::strftime($self->[-1]->{'_config'}->{'timefmt'},@gt);
+    } else {
+	return scalar gmtime;
+    }
+}
 
 package CGI::SSI::Local;
 
-sub TIESCALAR { bless {},$_[0] }
-sub FETCH { localtime() }
+sub TIESCALAR { bless [@_], shift() }
+sub FETCH {
+    my $self = shift;
+    if($self->[-1]->{'_config'}->{'timefmt'}) {
+	my @lt = localtime;
+	return Date::Format::strftime($self->[-1]->{'_config'}->{'timefmt'},@lt);
+    } else {
+	return scalar localtime;
+    }
+}
 
 
 1;
@@ -643,13 +673,13 @@ write C<\\\\> to mean C<\>.
 C<Apache::SSI> and the SSI C<spec> at
 http://www.apache.org/docs/mod/mod_include.html
 
-=head1 COPYRIGHT
+=head1 AUTHOR
 
-Copyright 2000 James Tolley   All Rights Reserved.
+(c) 2000-2005 James Tolley <james@bitperfect.com> All Rights Reserved.
 
 This is free software. You may copy and/or modify it under
 the same terms as perl itself.
 
-=head1 AUTHOR
+=head1 CREDITS
 
-James Tolley <james@bitperfect.com>
+Many Thanks to Corey Wilson for a bug report and fix.
