@@ -6,9 +6,10 @@ use File::Spec;
 use FindBin;
 use LWP::Simple;
 use URI;
+#use URI::Escape qw(uri_unescape);
 use Date::Format;
 
-$CGI::SSI::VERSION = '0.13';
+$CGI::SSI::VERSION = '0.50';
 
 my $debug = 0;
 
@@ -20,7 +21,7 @@ tie $loc,'CGI::SSI::Local';
 
 sub import {
     my($class,%args) = @_;
-    return unless defined $args{'autotie'};
+    return unless exists $args{'autotie'};
     $args{'filehandle'} = $args{'autotie'} =~ /::/ ? $args{'autotie'} : caller().'::'.$args{'autotie'};
     no strict 'refs';
     my $self = tie(*{$args{'filehandle'}},$class,%args);
@@ -49,9 +50,9 @@ sub new {
                                 };
 
     $self->{'_config'}        = {
-        errmsg  =>  '[an error occurred while processing this directive]',
-        sizefmt =>  'abbrev',
-        timefmt =>  undef,
+        errmsg  =>  ($args{'errmsg'}  || '[an error occurred while processing this directive]'),
+        sizefmt =>  ($args{'sizefmt'} || 'abbrev'),
+        timefmt =>  ($args{'timefmt'} ||  undef),
                                 };
 
     $self->{'_in_if'}     = 0;
@@ -85,7 +86,7 @@ sub process {
     my $processed = '';
     @shtml = split(/(<!--#.+?-->)/,join '',@shtml);
     for my $token (@shtml) {
-	next unless(defined $token and length $token);
+#	next unless(defined $token and length $token);
         if($token =~ /^<!--#(.+?)\s*-->$/) {
 	    $processed .= $self->_process_ssi_text($self->_interp_vars($1));
 	} else {
@@ -128,23 +129,19 @@ sub _echo {
 #
 
 sub config {
-    my($self,%args) = @_;
-    for my $key (keys %args) {
-	$args{lc $key} = $args{$key};
-	delete $args{$key} unless $key eq lc $key;
-    }
-    if(exists $args{'timefmt'}) {
-	$self->{'_config'}->{'timefmt'} = $args{'timefmt'};
-    } elsif(exists $args{'sizefmt'}) {
-	if(lc $args{'sizefmt'} eq 'abbrev') {
+    my($self,$type,$value) = @_;
+    if($type =~ /^timefmt$/i) {
+	$self->{'_config'}->{'timefmt'} = $value;
+    } elsif($type =~ /^sizefmt$/i) {
+	if(lc $value eq 'abbrev') {
 	    $self->{'_config'}->{'sizefmt'} = 'abbrev';
-	} elsif(lc $args{'sizefmt'} eq 'bytes') {
+	} elsif(lc $value eq 'bytes') {
 	    $self->{'_config'}->{'sizefmt'} = 'bytes';
 	} else {
 	    return $self->{'_config'}->{'errmsg'};
 	}
-    } elsif(exists $args{'errmsg'}) {
-	$self->{'_config'}->{'errmsg'} = $args{'errmsg'};
+    } elsif($type =~ /^errmsg$/i) {
+	$self->{'_config'}->{'errmsg'} = $value;
     } else {
 	return $self->{'_config'}->{'errmsg'};
     }
@@ -153,14 +150,11 @@ sub config {
 
 sub set {
     my($self,%args) = @_;
-    for my $key (keys %args) {
-	$args{lc $key} = $args{$key};
-	delete $args{$key} unless $key eq lc $key;
-    }
     if(scalar keys %args > 1) {
 	$self->{'_variables'}->{$args{'var'}} = $args{'value'};
     } else { # var => value notation
-	$self->{'_variables'}->{(keys %args)[0]} = (values %args)[0];
+	my($var,$value) = %args;
+	$self->{'_variables'}->{$var} = $value;
     }
     return '';
 }
@@ -200,7 +194,22 @@ sub _include_file {
 sub _include_virtual {
     my($self,$filename) = @_;
     if($filename =~ m|^/|) { # this is on the local server
-	return $self->_include_file($self->{'_variables'}->{'DOCUMENT_ROOT'}.$filename);
+#
+# should never have put this in.
+#
+#	my($old_query_string,$old_unescaped_query_string);
+#       if($filename =~ s/\?(.+)$//) {
+#	    $ENV{QUERY_STRING} ||= '';           # ??
+#	    $old_query_string  = $ENV{QUERY_STRING};
+#	    $ENV{QUERY_STRING_UNESCAPED} ||= ''; # ??
+#	    $old_unescaped_query_string  = $ENV{QUERY_STRING_UNESCAPED};
+#	    $ENV{QUERY_STRING} = $1;
+#	    $ENV{QUERY_STRING_UNESCAPED} = uri_unescape($ENV{QUERY_STRING});
+#	}
+	my $response = $self->_include_file($self->{'_variables'}->{'DOCUMENT_ROOT'}.$filename);
+#	$ENV{QUERY_STRING} = $old_query_string;
+#	$ENV{QUERY_STRING_UNESCAPED} = $old_unescaped_query_string;
+	return $response;
     }
     my $response = undef;
     eval {
@@ -468,23 +477,23 @@ __END__
 =head1 DESCRIPTION
 
 CGI::SSI is meant to be used as an easy way to filter shtml 
-through cgi scripts in a loose imitation of Apache's mod_include. 
+through CGI scripts in a loose imitation of Apache's mod_include. 
 If you're using Apache, you may want to use either mod_include or 
-the Apache::SSI module instead. Due to limitations in a CGI 
-script's knowledge of how the server behaves makes some SSI
+the Apache::SSI module instead of CGI::SSI. Limitations in a CGI 
+script's knowledge of how the server behaves make some SSI
 directives impossible to imitate from a CGI script.
 
 Most of the time, you'll simply want to filter shtml through STDOUT 
 or some other open filehandle. C<autotie> is available for STDOUT, 
 but in general, you'll want to tie other filehandles yourself:
 
-    $ssi = tie *FH, 'CGI::SSI', filehandle => 'FH';
+    $ssi = tie(*FH, 'CGI::SSI', filehandle => 'FH');
     print FH $shtml;
 
 Note that you'll need to pass the name of the filehandle to C<tie()> as 
 a named parameter. Other named parameters are possible, as detailed 
 below. These parameters are the same as those passed to the C<new()> 
-method. However, C<new()> will not tie a filehandle.
+method. However, C<new()> will not tie a filehandle for you.
 
 CGI::SSI has it's own flavor of SSI. Test expressions are Perlish. 
 You may create and use multiple CGI::SSI objects; they will not 
@@ -549,7 +558,7 @@ those of the SSI C<spec>, referenced below.
 =item $ssi->set($varname => $value)
 
 Sets variables internal to the CGI::SSI object. (Not to be confused 
-with the normal variables your script uses.) These variables may be used 
+with the normal variables your script uses!) These variables may be used 
 in test expressions, and retreived using $ssi->echo($varname).
 
 =item $ssi->echo($varname)
@@ -571,12 +580,11 @@ $type is either 'cmd' or 'cgi'. $arg is similar to the SSI C<spec>
 
 =item $ssi->include($type, $arg)
 
-Same as C<exec>.
+Similar to C<exec>, but C<virtual> and C<file> are the two valid types.
 
 =item $ssi->flastmod($type, $filename)
 
-$type is either 'file' or 'virtual'. $arg is similar to the SSI C<spec> 
-(see below).
+Similar to C<include>.
 
 =item $ssi->fsize($type, $filename)
 
@@ -585,8 +593,6 @@ Same as C<flastmod>.
 =item $ssi->printenv
 
 Returns the environment similar to Apache's mod_include.
-
-=back
 
 =back
 
@@ -599,6 +605,23 @@ if tied).
 =over 4
 
 =item $ssi->if($expr)
+
+The expr can be anything Perl, but care should be taken. This causes 
+problems:
+
+ $ssi->set(varname => "foo");
+ <!--#if expr="'\$varname' =~ /^foo$/" -->ok<!--#endif -->
+
+The $varname is expanded as you would expect. (We escape it so as to use 
+the C<$varname> within the CGI::SSI object, instead of that within our 
+progam.) But the C<$/> inside the regex is also expanded. This is fixed 
+by escaping the C<$>:
+
+ <!--#if expr="'\$varname' =~ /^value\$/" -->ok<!--#endif -->
+
+The expressions used in if and elif tags/calls are tricky due to
+the number of escapes required. In some cases, you'll need to 
+write C<\\\\> to mean C<\>. 
 
 =item $ssi->elif($expr)
 
