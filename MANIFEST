@@ -1,6 +1,7 @@
 Changes
 MANIFEST
 Makefile.PL
-README
 SSI.pm
+include.html
 test.pl
+test.shtml
