@@ -1,520 +1,649 @@
 package CGI::SSI;
-
 use strict;
-use POSIX;
-use vars qw($VERSION @ISA @EXPORT @EXPORT_OK);
 
-require Exporter;
+use HTML::SimpleParse;
+use File::Spec;
+use FindBin;
+use LWP::Simple;
+use URI;
+#use URI::Escape qw(uri_unescape);
+use Date::Format;
 
-@ISA = qw(Exporter AutoLoader);
-@EXPORT = qw(fssi sssi);
-$VERSION = '0.01';
+$CGI::SSI::VERSION = '0.51';
 
-use vars qw($recursive $debug);
+my $debug = 0;
 
-$recursive = 0;
-$debug = 0;
+######### tie some vars for ease and precision
+my($gmt,$loc);
+tie $gmt,'CGI::SSI::Gmt';
+tie $loc,'CGI::SSI::Local';
+#########
 
-my $error_msg = '[an error occurred while processing this directive]';
-my $SIZEFMT_BYTES = 0;	# sizefmt = bytes
-my $SIZEFMT_KMG = 1;	# sizefmt = abbrev
-my $sizefmt = $SIZEFMT_KMG;
-my $timefmt = "%c";	# current locale's default
-my($starting_sequence, $ending_sequence) = ('<!--#', '-->');
-my($real_path, $virtual_path);
-
-
-# Usage:         ssi_init();
-#
-sub ssi_init {
-	my(@real_path, @virtual_path);
-	my $i;
-
-	unless (defined($ENV{'DOCUMENT_ROOT'}) ||
-		defined($ENV{'SCRIPT_FILENAME'}) ||
-		defined($ENV{'SCRIPT_NAME'})) {
-		print FOUT $error_msg;
-		return 0;
-	}
-
-	@real_path = reverse split(/\//, $ENV{'SCRIPT_FILENAME'});
-	pop(@real_path);
-	@virtual_path = reverse split(/\//, $ENV{'SCRIPT_NAME'});
-	pop(@virtual_path);
-
-	for ($i=0; (($i <= $#virtual_path) && ($virtual_path[$i] eq $real_path[$i])); $i++) {
-	}
-
-	$real_path = "/" . join("/", reverse @real_path[$i..$#real_path]);
-	$virtual_path = "/" . join("/", reverse @virtual_path[$i..$#virtual_path]);
-
-#	$file =~ s/^$virtual_path/$real_path\//o;
-#	warn($file) if ($debug);
+sub import {
+    my($class,%args) = @_;
+    return unless exists $args{'autotie'};
+    $args{'filehandle'} = $args{'autotie'} =~ /::/ ? $args{'autotie'} : caller().'::'.$args{'autotie'};
+    no strict 'refs';
+    my $self = tie(*{$args{'filehandle'}},$class,%args);
+    return $self;
 }
 
-# Usage:         ssi_config_errmsg($line);
-#
-sub ssi_config_errmsg {
-	my $line = shift;
+sub new {
+    my($class,%args) = @_;
+    my $self = bless {}, $class;
 
-	$error_msg = $line;
+    $self->{'_handle'}        = undef;
+
+    my $script_name = '';
+    if(exists $ENV{'SCRIPT_NAME'}) {
+	($script_name) = $ENV{'SCRIPT_NAME'} =~ /([^\/]+)$/;
+    }
+
+    $ENV{'DOCUMENT_ROOT'} ||= '';
+    $self->{'_variables'}     = {
+        DOCUMENT_URI    =>  ($args{'DOCUMENT_URI'} || $ENV{'SCRIPT_NAME'}),
+        DATE_GMT        =>  $gmt,
+        DATE_LOCAL      =>  $loc,
+        LAST_MODIFIED   =>  $self->flastmod('file', $ENV{'SCRIPT_FILENAME'} || $ENV{'PATH_TRANSLATED'} || ''),
+        DOCUMENT_NAME   =>  ($args{'DOCUMENT_NAME'} || $script_name),
+	DOCUMENT_ROOT   =>  ($args{'DOCUMENT_ROOT'} || $ENV{DOCUMENT_ROOT}),
+                                };
+
+    $self->{'_config'}        = {
+        errmsg  =>  ($args{'errmsg'}  || '[an error occurred while processing this directive]'),
+        sizefmt =>  ($args{'sizefmt'} || 'abbrev'),
+        timefmt =>  ($args{'timefmt'} ||  undef),
+                                };
+
+    $self->{'_in_if'}     = 0;
+    $self->{'_suspend'}   = [0];
+    $self->{'_seen_true'} = [1];
+
+    return $self;
 }
 
-# Usage:         ssi_config_sizefmt($line);
-#
-sub ssi_config_sizefmt {
-	my $line = shift;
-
-	if ($line eq "bytes") {
-		$sizefmt = $SIZEFMT_BYTES;
-	} elsif ($line eq "abbrev") {
-		$sizefmt = $SIZEFMT_KMG;
-	}
+sub TIEHANDLE {
+    my($class,%args) = @_;
+    my $self = $class->new(%args);
+    $self->{'_handle'} = do { local *STDOUT };
+    my $handle_to_tie = '';
+    if($args{'filehandle'} !~ /::/) {
+	$handle_to_tie = caller().'::'.$args{'filehandle'};
+    } else {
+	$handle_to_tie = $args{'filehandle'};
+    }
+    open($self->{'_handle'},'>&'.$handle_to_tie) or die "Failed to copy the filehandle ($handle_to_tie): $!";
+    return $self;
 }
 
-# Usage:         ssi_config_timefmt($line);
-#
-sub ssi_config_timefmt {
-	my $line = shift;
-
-	$timefmt = $line;
+sub PRINT {
+    my($self,@shtml) = @_;
+    print {$self->{'_handle'}} map { $self->process($_) } @shtml;
 }
 
-# Usage:         ssi_echo_var($line);
-#
-sub ssi_echo_var {
-	my $line = shift;
-
-	if ($line eq "DATE_GMT") {
-		print FOUT strftime($timefmt, gmtime(time));
-	} elsif ($line eq "DATE_LOCAL") {
-		print FOUT strftime($timefmt, localtime(time));
-	} elsif ($line eq "DOCUMENT_NAME") {
-		print FOUT "(none)";
-	} elsif ($line eq "DOCUMENT_URI") {
-		print FOUT "(none)";
-	} elsif ($line eq "LAST_MODIFIED") {
-		print FOUT "(none)";
+sub process {
+    my($self,@shtml) = @_;
+    my $processed = '';
+    @shtml = split(/(<!--#.+?-->)/,join '',@shtml);
+    for my $token (@shtml) {
+#	next unless(defined $token and length $token);
+        if($token =~ /^<!--#(.+?)\s*-->$/) {
+	    $processed .= $self->_process_ssi_text($self->_interp_vars($1));
 	} else {
-		print FOUT "(none)";
+	    next if $self->_suspended;
+	    $processed .= $token;
 	}
+    }
+    return $processed;
 }
 
-# Usage:         ssi_exec_cgi($file);
+sub _process_ssi_text {
+    my($self,$text) = @_;
+    return '' if($self->_suspended and $text !~ /^(?:if|else|elif|endif)\b/);
+    return $self->{'_config'}->{'errmsg'} unless $text =~ s/^(\S+)\s*//;
+    my $method = $1;
+    return $self->$method( HTML::SimpleParse->parse_args($text) );
+}
+
+# many thanks to Apache::SSI
+sub _interp_vars {
+    local $^W = 0;
+    my($self,$text) = @_;
+    my($a,$b,$c) = ('','','');
+    $text =~ s{ (^|[^\\]) (\\\\)* \$(?:\{)?(\w+)(?:\})? }
+              {($a,$b,$c)=($1,$2,$3); $a . substr($b,length($b)/2) . $self->_echo($c) }exg;
+    return $text;
+}
+
+# for internal use only - returns the thing passed in if it's not defined. echo() returns '' in that case.
+sub _echo {
+    my($self,$key,$var) = @_;
+    $var = $key if @_ == 2;
+    return $self->{'_variables'}->{$var} if exists $self->{'_variables'}->{$var};
+    return $ENV{$var} if exists $ENV{$var};
+    return $var;
+}
+
 #
-sub ssi_exec_cgi {
-	my $file = shift;
-	my $line;
-	local(*FIN);
+# ssi directive methods
+#
 
-	$file =~ s/^$virtual_path/$real_path\//o;
-
-	open(FIN, "$file|");
-	unless($line = join("", <FIN>)) {
-		warn("Can't run $file\n") if ($debug);
-		print FOUT $error_msg;
-		return;
-	}
-	$line =~ /\r?\n\r?\n/o;
-	$line = $';
-	if ($recursive) {
-		sssi($line);
+sub config {
+    my($self,$type,$value) = @_;
+    if($type =~ /^timefmt$/i) {
+	$self->{'_config'}->{'timefmt'} = $value;
+    } elsif($type =~ /^sizefmt$/i) {
+	if(lc $value eq 'abbrev') {
+	    $self->{'_config'}->{'sizefmt'} = 'abbrev';
+	} elsif(lc $value eq 'bytes') {
+	    $self->{'_config'}->{'sizefmt'} = 'bytes';
 	} else {
-		print FOUT $line;
+	    return $self->{'_config'}->{'errmsg'};
 	}
-	close(FIN);
+    } elsif($type =~ /^errmsg$/i) {
+	$self->{'_config'}->{'errmsg'} = $value;
+    } else {
+	return $self->{'_config'}->{'errmsg'};
+    }
+    return '';
 }
 
-# Usage:         ssi_exec_cmd($file);
+sub set {
+    my($self,%args) = @_;
+    if(scalar keys %args > 1) {
+	$self->{'_variables'}->{$args{'var'}} = $args{'value'};
+    } else { # var => value notation
+	my($var,$value) = %args;
+	$self->{'_variables'}->{$var} = $value;
+    }
+    return '';
+}
+
+sub echo {
+    my($self,$key,$var) = @_;
+    $var = $key if @_ == 2;
+    return $self->{'_variables'}->{$var} if exists $self->{'_variables'}->{$var};
+    return $ENV{$var} if exists $ENV{$var};
+    return '';
+}
+
+sub printenv {
+    #my $self = shift;
+    return join "\n",map {"$_=$ENV{$_}"} keys %ENV; 
+}
+
+sub include {
+    my($self,$type,$filename) = @_;
+    if(lc $type eq 'file') {
+	return $self->_include_file($filename);
+    } elsif(lc $type eq 'virtual') {
+	return $self->_include_virtual($filename);
+    } else {
+	return $self->{'_config'}->{'errmsg'};
+    }
+}
+
+sub _include_file {
+    my($self,$filename) = @_;
+    $filename = File::Spec->catfile($FindBin::Bin,$filename) unless -e $filename;
+    my $fh = do { local *STDIN };
+    open($fh,$filename) or return $self->{'_config'}->{'errmsg'};
+    return $self->process(join '',<$fh>);
+}
+
+sub _include_virtual {
+    my($self,$filename) = @_;
+    if($filename =~ m|^/|) { # this is on the local server
 #
-sub ssi_exec_cmd {
-	my $file = shift;
-	my $line;
-	local(*FIN);
-
-	open(FIN, "$file|");
-	unless($line = join("", <FIN>)) {
-		print FOUT $error_msg;
-		return;
-	}
-	if ($recursive) {
-		sssi($line);
-	} else {
-		print FOUT $line;
-	}
-	close(FIN);
-}
-
-# Usage:         ssi_fsize_file($file);
+# should never have put this in.
 #
-sub ssi_fsize_file {
-	my $file = shift;
-	my $size;
-
-	$size = (stat("$file"))[7];
-	if ($sizefmt == $SIZEFMT_KMG) {
-		if ($size/1048576 >= 1) { # 1024*1024
-			$size = sprintf("%.1fM", $size/1048576);
-		} else {
-			$size = ceil($size/1024) . "k";
-		}
-	}
-	print FOUT $size;
+#	my($old_query_string,$old_unescaped_query_string);
+#       if($filename =~ s/\?(.+)$//) {
+#	    $ENV{QUERY_STRING} ||= '';           # ??
+#	    $old_query_string  = $ENV{QUERY_STRING};
+#	    $ENV{QUERY_STRING_UNESCAPED} ||= ''; # ??
+#	    $old_unescaped_query_string  = $ENV{QUERY_STRING_UNESCAPED};
+#	    $ENV{QUERY_STRING} = $1;
+#	    $ENV{QUERY_STRING_UNESCAPED} = uri_unescape($ENV{QUERY_STRING});
+#	}
+	my $response = $self->_include_file($self->{'_variables'}->{'DOCUMENT_ROOT'}.$filename);
+#	$ENV{QUERY_STRING} = $old_query_string;
+#	$ENV{QUERY_STRING_UNESCAPED} = $old_unescaped_query_string;
+	return $response;
+    }
+    my $response = undef;
+    eval {
+	my $uri = URI->new($filename);
+	$uri->scheme($uri->scheme || 'http'); # ??
+	$uri->host($uri->host || $ENV{'HTTP_HOST'} || $ENV{'SERVER_NAME'});
+	$response = get $uri->canonical;
+    };
+    return $self->{'_config'}->{'errmsg'} if $@;
+    return $self->{'_config'}->{'errmsg'} unless defined $response;
+    return $self->process($response);
 }
 
-# Usage:         ssi_fsize_virtual($file);
+sub exec {
+    my($self,$type,$filename) = @_;
+    if(lc $type eq 'cmd') {
+	return $self->_exec_cmd($filename);
+    } elsif(lc $type eq 'cgi') {
+	return $self->_exec_cgi($filename);
+    } else {
+	return $self->{'_config'}->{'errmsg'};
+    }
+}
+
+sub _exec_cmd {
+    my($self,$filename) = @_;
+    my $output = `$filename`; # security here is mighty bad.
+    return $self->{'_config'}->{'errmsg'} if $?;
+    return $self->process($output);
+}
+
+sub _exec_cgi { # no relative $filename allowed.
+    my($self,$filename) = @_;
+    my $response = undef;
+    eval {
+	my $uri = URI->new($filename);
+	$uri->scheme($uri->scheme || 'http');
+	$uri->host($uri->host || $ENV{'HTTP_HOST'} || $ENV{'SERVER_NAME'});
+	$uri->query($uri->query || $ENV{'QUERY_STRING'});
+	$response = get $uri->canonical;
+    };
+    return $self->{'_config'}->{'errmsg'} if $@;
+    return $self->{'_config'}->{'errmsg'} unless defined $response;
+    return $self->process($response);
+}
+
+sub flastmod {
+    my($self,$type,$filename) = @_;
+
+    if(lc $type eq 'file') {
+	$filename = File::Spec->catfile($FindBin::Bin,$filename) unless -e $filename;
+    } elsif(lc $type eq 'virtual') {
+	$filename = File::Spec->catfile($self->{'_variables'}->{'DOCUMENT_ROOT'},$filename)
+	    unless $filename =~ /$self->{'_variables'}->{'DOCUMENT_ROOT'}/;
+    } else {
+	return $self->{'_config'}->{'errmsg'};
+    }
+    return $self->{'_config'}->{'errmsg'} unless -e $filename;
+
+    my $flastmod = (stat $filename)[9];
+    
+    if($self->{'_config'}->{'timefmt'}) {
+	my @localtime = localtime($flastmod); # need this??
+	return Date::Format::strftime($self->{'_config'}->{'timefmt'},@localtime);
+    } else {
+	return scalar localtime($flastmod);
+    }
+}
+
+sub fsize {
+    my($self,$type,$filename) = @_;
+
+    if(lc $type eq 'file') {
+	$filename = File::Spec->catfile($FindBin::Bin,$filename) unless -e $filename;
+    } elsif(lc $type eq 'virtual') {
+	$filename = File::Spec->catfile($ENV{'DOCUMENT_ROOT'},$filename) unless $filename =~ /$ENV{'DOCUMENT_ROOT'}/;
+    } else {
+	return $self->{'_config'}->{'errmsg'};
+    }
+    return $self->{'_config'}->{'errmsg'} unless -e $filename;
+
+    my $fsize = (stat $filename)[7];
+    
+    if(lc $self->{'_config'}->{'sizefmt'} eq 'bytes') {
+	1 while $fsize =~ s/^(\d+)(\d{3})/$1,$2/g;
+	return $fsize;
+    } else { # abbrev
+	# gratefully lifted from Apache::SSI
+	return "   0k" unless $fsize;
+	return "   1k" if $fsize < 1024;
+	return sprintf("%4dk", ($fsize + 512)/1024) if $fsize < 1048576;
+	return sprintf("%4.1fM", $fsize/1048576.0) if $fsize < 103809024;
+	return sprintf("%4dM", ($fsize + 524288)/1048576) if $fsize < 1048576;
+    }
+}
+
 #
-sub ssi_fsize_virtual {
-	my $file = shift;
-
-	$file = "$ENV{'DOCUMENT_ROOT'}/$file";
-	ssi_fsize_file($file);
-}
-
-# Usage:         ssi_flastmod_file($file);
+# if/elsif/else/endif and related methods
 #
-sub ssi_flastmod_file {
-	my $file = shift;
-	my $lastmod;
 
-	$lastmod = (stat("$file"))[9];
-	$lastmod = strftime($timefmt, localtime($lastmod));
-	print FOUT $lastmod;
+sub _test {
+    my($self,$test) = @_;
+    my $retval = eval($test);
+    return undef if $@;
+    return defined $retval ? $retval : 0;
 }
 
-# Usage:         ssi_flastmod_virtual($file);
+sub _entering_if {
+    my $self = shift;
+    $self->{'_in_if'}++;
+    $self->{'_suspend'}->[$self->{'_in_if'}] = $self->{'_suspend'}->[$self->{'_in_if'} - 1];
+    $self->{'_seen_true'}->[$self->{'_in_if'}] = 0;
+}
+
+sub _seen_true {
+    my $self = shift;
+    return $self->{'_seen_true'}->[$self->{'_in_if'}];
+}
+
+sub _suspended {
+    my $self = shift;
+    return $self->{'_suspend'}->[$self->{'_in_if'}];
+}
+
+sub _leaving_if {
+    my $self = shift;
+    $self->{'_in_if'}-- if $self->{'_in_if'};
+}
+
+sub _true {
+    my $self = shift;
+    return $self->{'_seen_true'}->[$self->{'_in_if'}]++;
+}
+
+sub _suspend {
+    my $self = shift;
+    $self->{'_suspend'}->[$self->{'_in_if'}]++;
+}
+
+sub _resume {
+    my $self = shift;
+    $self->{'_suspend'}->[$self->{'_in_if'}]--
+	if $self->{'_suspend'}->[$self->{'_in_if'}];
+}
+
+sub _in_if {
+    my $self = shift;
+    return $self->{'_in_if'};
+}
+
+sub if {
+    my($self,$expr,$test) = @_;
+    $expr = $test if @_ == 3;
+    $self->_entering_if();
+    if($self->_test($expr)) {
+	$self->_true();
+    } else {
+	$self->_suspend();
+    }
+    return '';
+}
+
+sub elif {
+    my($self,$expr,$test) = @_;
+    die "Incorrect use of elif ssi directive: no preceeding 'if'." unless $self->_in_if();
+    $expr = $test if @_ == 3;
+    if(! $self->_seen_true() and $self->_test($expr)) {
+	$self->_true();
+	$self->_resume();
+    } else {
+	$self->_suspend() unless $self->_suspended();
+    }
+    return '';
+}
+
+sub else {
+    my $self = shift;
+    die "Incorrect use of else ssi directive: no preceeding 'if'." unless $self->_in_if();
+    unless($self->_seen_true()) {
+	$self->_resume();
+    } else {
+	$self->_suspend();
+    }
+    return '';
+}
+
+sub endif {
+    my $self = shift;
+    die "Incorrect use of endif ssi directive: no preceeding 'if'." unless $self->_in_if();
+    $self->_leaving_if();
+    $self->_resume() if $self->_suspended();
+    return '';
+}
+
 #
-sub ssi_flastmod_virtual {
-	my $file = shift;
-
-	$file = "$ENV{'DOCUMENT_ROOT'}/$file";
-	ssi_flastmod_file($file);
-}
-
-# Usage:         ssi_include_file($file);
+# packages for tie()
 #
-sub ssi_include_file {
-	my $file = shift;
-	my $line;
-	local(*FIN);
 
-	unless(open(FIN, $file)) {
-        print FOUT $error_msg;
-        warn("Can't open file $file: $!");
-        return;
-	}
-	$line = join("", <FIN>);
-	if ($recursive) {
-		sssi($line);
-	} else {
-		print FOUT $line;
-	}
-	close(FIN);
-}
+package CGI::SSI::Gmt;
 
-# Usage:         ssi_include_virtual($file);
-#
-sub ssi_include_virtual {
-	my $file = shift;
+sub TIESCALAR { bless {},$_[0] }
+sub FETCH { gmtime() }
 
-	$file = "$ENV{'DOCUMENT_ROOT'}/$file";
-	ssi_include_file($file);
-}
+package CGI::SSI::Local;
 
-# Usage:         ssi_printenv();
-#
-sub ssi_printenv {
-	foreach (sort keys(%ENV)) {
-		print "$_=$ENV{$_}\n";
-	}
-}
+sub TIESCALAR { bless {},$_[0] }
+sub FETCH { localtime() }
 
-# Usage:         parse_ssi($ssi);
-#
-sub parse_ssi {
-	my $ssi = shift;
-	my($element, @attr);
-
-	$ssi =~ /^(\w+)/;
-	$element = $1;
-	$ssi = $';
-	$ssi =~ s/^\s+//;
-	if ($element eq "config") {
-		while ($ssi =~ /(\w+)="(.*[^\\])"/) {
-			if ($1 eq "errmsg") {
-				ssi_config_errmsg($2);
-			} elsif ($1 eq "sizefmt") {
-				ssi_config_sizefmt($2);
-			} elsif ($1 eq "timefmt") {
-				ssi_config_timefmt($2);
-			} else {
-				print FOUT $error_msg;
-			}
-			$ssi = $';
-		}
-	} elsif ($element eq "echo") {
-		while ($ssi =~ /(\w+)="(.*[^\\])"/) {
-			if ($1 eq "var") {
-				ssi_echo_var($2);
-			} else {
-				print FOUT $error_msg;
-			}
-			$ssi = $';
-		}
-	} elsif ($element eq "exec") {
-		while ($ssi =~ /(\w+)="(.*[^\\])"/) {
-			if ($1 eq "cgi") {
-				ssi_exec_cgi($2);
-			} elsif ($1 eq "cmd") {
-				ssi_exec_cmd($2);
-			} else {
-				print FOUT $error_msg;
-			}
-			$ssi = $';
-		}
-	} elsif ($element eq "fsize") {
-		while ($ssi =~ /(\w+)="(.*[^\\])"/) {
-			if ($1 eq "file") {
-				ssi_fsize_file($2);
-			} elsif ($1 eq "virtual") {
-				ssi_fsize_virtual($2);
-			} else {
-				print FOUT $error_msg;
-			}
-			$ssi = $';
-		}
-	} elsif ($element eq "flastmod") {
-		while ($ssi =~ /(\w+)="(.*[^\\])"/) {
-			if ($1 eq "file") {
-				ssi_flastmod_file($2);
-			} elsif ($1 eq "virtual") {
-				ssi_flastmod_virtual($2);
-			} else {
-				print FOUT $error_msg;
-			}
-			$ssi = $';
-		}
-	} elsif ($element eq "include") {
-		while ($ssi =~ /(\w+)="(.*[^\\])"/) {
-			if ($1 eq "file") {
-				ssi_include_file($2);
-			} elsif ($1 eq "virtual") {
-				ssi_include_virtual($2);
-			} else {
-				print FOUT $error_msg;
-			}
-			$ssi = $';
-		}
-	} elsif ($element eq "printenv") {
-		if ($ssi eq "") {
-			ssi_printenv();
-		} else {
-			print FOUT $error_msg;
-		}
-	} elsif ($element eq "set") {
-		print FOUT $error_msg;
-	} else {
-		print FOUT $error_msg;
-	}
-}
-
-# Usage:         fssi($file);
-#
-sub fssi {
-	my $file = shift;
-	my($line, $ssi);
-	local(*FIN, *FOUT);
-	my $inside = 0;
-
-	*FOUT = *STDOUT;
-
-	ssi_init() || return 0;
-
-	unless(open(FIN, $file)) {
-		print FOUT $error_msg;
-		warn("Can't open file $file: $!");
-		return;
-	}
-
-	while ($line = <FIN>) {
-		if ($inside) {
-			if ($line =~ /$ending_sequence/) {
-				$inside = 0;
-				$ssi .= $`;
-				$line = $';
-				$ssi =~ s/^\s+//s;
-				$ssi =~ s/\s+$//s;
-				$ssi =~ s/\s+/ /s;
-				# execute SSI
-				warn("SSI: $ssi.\n") if ($debug);
-				parse_ssi($ssi);
-				$ssi = '';
-				redo;
-			} else {
-				$ssi .= $line;
-			}
-		} else {
-			if ($line =~ /$starting_sequence/) {
-				$inside = 1;
-				print FOUT $`;
-				$line  = $';
-				redo;
-			} else {
-				print FOUT $line;
-			}
-		}
-	}
-
-	close(FIN);
-}
-
-# Usage:         sssi($line);
-#
-sub sssi {
-	my $line = shift;
-	my $ssi;
-	local(*FIN, *FOUT);
-	my $inside = 0;
-
-	*FOUT = *STDOUT;
-
-	ssi_init() || return 0;
-
-	while (1) {
-		if ($inside) {
-			if ($line =~ /$ending_sequence/) {
-				$inside = 0;
-				$ssi .= $`;
-				$line = $';
-				$ssi =~ s/^\s+//s;
-				$ssi =~ s/\s+$//s;
-				$ssi =~ s/\s+/ /s;
-				# execute SSI
-				warn("SSI: $ssi.\n") if ($debug);
-				parse_ssi($ssi);
-				$ssi = '';
-				redo;
-			} else {
-				$ssi .= $line;
-			}
-		} else {
-			if ($line =~ /$starting_sequence/) {
-				$inside = 1;
-				print FOUT $`;
-				$line  = $';
-				redo;
-			} else {
-				print FOUT $line;
-				last;
-			}
-		}
-	}
-}
 
 1;
 __END__
 
+
 =head1 NAME
 
-CGI::SSI - Implement SSI for Perl CGI
+ CGI::SSI - Use SSI from CGI scripts
 
 =head1 SYNOPSIS
 
-  use CGI::SSI;
+ # autotie STDOUT or any other open filehandle
 
-  $CGI::SSI::recursive = 1;
+   use CGI::SSI (autotie => STDOUT);
 
-  fssi($filename);
-  sssi($string);
+   print $shtml; # browser sees resulting HTML
+
+ # or tie it yourself to any open filehandle
+
+   use CGI::SSI;
+
+   open(FILE,'+>'.$html_file) or die $!;
+   $ssi = tie(*FILE, 'CGI::SSI', filehandle => 'FILE');
+   print FILE $shtml; # HTML arrives in the file
+
+ # or use the object-oriented interface
+
+   use CGI::SSI;
+
+   $ssi = CGI::SSI->new();
+
+   $ssi->if('"$varname" =~ /^foo/');
+      $html .= $ssi->process($shtml);
+   $ssi->else();
+      $html .= $ssi->include(file => $filename);
+   $ssi->endif();
+
+   print $ssi->exec(cgi => $url);
+   print $ssi->flastmod(file => $filename);
+
+ #
+ # or roll your own favorite flavor of SSI
+ #
+
+   package CGI::SSI::MySSI;
+   use CGI::SSI;
+   @CGI::SSI::MySSI::ISA = qw(CGI::SSI);
+
+   sub include {
+      my($self,$type,$file_or_url) = @_; 
+      # my idea of include goes something like this...
+      return $html;
+   }
+   1;
+   __END__
 
 =head1 DESCRIPTION
 
-CGI::SSI is used in CGI scripts for parsing SSI directives in files or
-string variables, and fully implements the functionality of apache's
-mod_include module.
+CGI::SSI is meant to be used as an easy way to filter shtml 
+through CGI scripts in a loose imitation of Apache's mod_include. 
+If you're using Apache, you may want to use either mod_include or 
+the Apache::SSI module instead of CGI::SSI. Limitations in a CGI 
+script's knowledge of how the server behaves make some SSI
+directives impossible to imitate from a CGI script.
 
-It is an alternative to famous Apache::SSI modules, but it doesn't require
-mod_perl. This is an advantage to those who are using public hosting services.
-There is a disadvantage, however - the module consumes much memory, and
-I don't recommend using it on heavy-loaded sites (currently it's being used
-on a site with 10000 hits, and I consider this as a limit). I hope to get
-rid of this disadvantage by the time the release comes out (currently
-it's beta).
+Most of the time, you'll simply want to filter shtml through STDOUT 
+or some other open filehandle. C<autotie> is available for STDOUT, 
+but in general, you'll want to tie other filehandles yourself:
 
-=head2 SSI Directives
+    $ssi = tie(*FH, 'CGI::SSI', filehandle => 'FH');
+    print FH $shtml;
 
-This module supports the same directives as mod_include. For methods listed
-below but not documented, please see mod_include's online documentation at
-http://httpd.apache.org/docs/mod/mod_include.html .
+Note that you'll need to pass the name of the filehandle to C<tie()> as 
+a named parameter. Other named parameters are possible, as detailed 
+below. These parameters are the same as those passed to the C<new()> 
+method. However, C<new()> will not tie a filehandle for you.
+
+CGI::SSI has it's own flavor of SSI. Test expressions are Perlish. 
+You may create and use multiple CGI::SSI objects; they will not 
+step on each others' variables.
+
+Object-Oriented methods use the same general format so as to imitate 
+SSI directives:
+
+    <!--#include virtual="/foo/bar.footer" -->
+
+  would be
+
+    $ssi->include(virtual => '/foo/bar.footer');
+
+likewise,
+
+    <!--#exec cgi="/cgi-bin/foo.cgi" -->
+
+  would be
+
+    $ssi->exec(cgi => '/cgi-bin/foo.cgi');
+
+Usually, if there's no chance for ambiguity, the first argument may 
+be left out:
+
+    <!--#echo var="var_name" -->
+
+  could be either
+
+    $ssi->echo(var => 'var_name');
+
+  or
+
+    $ssi->echo('var_name');
+
+Likewise,
+
+    $ssi->set(var => $varname, value => $value)
+
+  is the same as 
+
+    $ssi->set($varname => $value)
 
 =over 4
 
-=item * config
+=item $ssi->new([%args])
 
-=item * echo
+Creates a new CGI::SSI object. The following are valid (optional) arguments: 
 
-This directive is not fully supported in current version.
+ DOCUMENT_URI    => $doc_uri,
+ DOCUMENT_NAME   => $doc_name,
+ DOCUMENT_ROOT   => $doc_root,
+ errmsg          => $oops,
+ sizefmt         => ('bytes' || 'abbrev'),
+ timefmt         => $time_fmt,
 
-=item * exec
+=item $ssi->config($type, $arg)
 
-=item * fsize
+$type is either 'sizefmt', 'timefmt', or 'errmsg'. $arg is similar to 
+those of the SSI C<spec>, referenced below.
 
-=item * flastmod
+=item $ssi->set($varname => $value)
 
-=item * include
+Sets variables internal to the CGI::SSI object. (Not to be confused 
+with the normal variables your script uses!) These variables may be used 
+in test expressions, and retreived using $ssi->echo($varname).
 
-=item * printenv
+=item $ssi->echo($varname)
 
-=item * set
+Returns the value of the variable named $varname. Such variables may 
+be set manually using the C<set()> method. There are also several built-in 
+variables:
 
-This directive is not supported in current version.
+ DOCUMENT_URI  - the URI of this document
+ DOCUMENT_NAME - the name of the current document
+ DATE_GMT      - the same as 'gmtime'
+ DATE_LOCAL    - the same as 'localtime'
+ FLASTMOD      - the last time this script was modified
 
-=item * perl
+=item $ssi->exec($type, $arg)
 
-This directive is not supported in current version.
+$type is either 'cmd' or 'cgi'. $arg is similar to the SSI C<spec> 
+(see below).
 
-=item * if
+=item $ssi->include($type, $arg)
 
-=item * elif
+Similar to C<exec>, but C<virtual> and C<file> are the two valid types.
 
-=item * else
+=item $ssi->flastmod($type, $filename)
 
-=item * endif
+Similar to C<include>.
 
-These four directives are not supported in current version.
+=item $ssi->fsize($type, $filename)
+
+Same as C<flastmod>.
+
+=item $ssi->printenv
+
+Returns the environment similar to Apache's mod_include.
 
 =back
 
-=head2 Outline Usage
+=head2 FLOW-CONTROL METHODS
 
-First you need to load the CGI::SSI module:
+The following methods may be used to test expressions. During a C<block> 
+where the test $expr is false, nothing will be returned (or printed, 
+if tied).
 
-  use CGI::SSI;
+=over 4
 
-You need to specify the following when processing of all nested directives
-is needed (default value - 0):
+=item $ssi->if($expr)
 
- $CGI::SSI::recursive = 1;
+The expr can be anything Perl, but care should be taken. This causes 
+problems:
 
-To parse file or string you need to use:
+ $ssi->set(varname => "foo");
+ <!--#if expr="'\$varname' =~ /^foo$/" -->ok<!--#endif -->
 
-  fssi($filename);
-  sssi($string);
+The $varname is expanded as you would expect. (We escape it so as to use 
+the C<$varname> within the CGI::SSI object, instead of that within our 
+progam.) But the C<$/> inside the regex is also expanded. This is fixed 
+by escaping the C<$>:
 
-The result is printed to STDOUT.
+ <!--#if expr="'\$varname' =~ /^value\$/" -->ok<!--#endif -->
 
-=head1 TO DO
+The expressions used in if and elif tags/calls are tricky due to
+the number of escapes required. In some cases, you'll need to 
+write C<\\\\> to mean C<\>. 
 
-Full implementation of all SSI directives.
+=item $ssi->elif($expr)
 
-Optimize memory consumption.
+=item $ssi->else
 
-=head1 AUTHOR
+=item $ssi->endif
 
-Vadim Y. Ponomarenko, vp@istc.kiev.ua
+
+=back
 
 =head1 SEE ALSO
 
-mod_include, perl(1).
+C<Apache::SSI> and the SSI C<spec> at
+http://www.apache.org/docs/mod/mod_include.html
 
-=cut
+=head1 COPYRIGHT
+
+Copyright 2000 James Tolley   All Rights Reserved.
+
+This is free software. You may copy and/or modify it under
+the same terms as perl itself.
+
+=head1 AUTHOR
+
+James Tolley <james@jamestolley.com>

@@ -1,82 +1,198 @@
 NAME
-    CGI::SSI - Implement SSI for Perl CGI
+     CGI::SSI - Use SSI from CGI scripts
 
 SYNOPSIS
-      use CGI::SSI;
+     # autotie STDOUT or any other open filehandle
 
-      $CGI::SSI::recursive = 1;
+       use CGI::SSI (autotie => STDOUT);
 
-      fssi($filename);
-      sssi($string);
+       print $shtml; # browser sees resulting HTML
+
+     # or tie it yourself to any open filehandle
+
+       use CGI::SSI;
+
+       open(FILE,'+>'.$html_file) or die $!;
+       $ssi = tie(*FILE, 'CGI::SSI', filehandle => 'FILE');
+       print FILE $shtml; # HTML arrives in the file
+
+     # or use the object-oriented interface
+
+       use CGI::SSI;
+
+       $ssi = CGI::SSI->new();
+
+       $ssi->if('"$varname" =~ /^foo/');
+          $html .= $ssi->process($shtml);
+       $ssi->else();
+          $html .= $ssi->include(file => $filename);
+       $ssi->endif();
+
+       print $ssi->exec(cgi => $url);
+       print $ssi->flastmod(file => $filename);
+
+     #
+     # or roll your own favorite flavor of SSI
+     #
+
+       package CGI::SSI::MySSI;
+       use CGI::SSI;
+       @CGI::SSI::MySSI::ISA = qw(CGI::SSI);
+
+       sub include {
+          my($self,$type,$file_or_url) = @_; 
+          # my idea of include goes something like this...
+          return $html;
+       }
+       1;
+       __END__
 
 DESCRIPTION
-    CGI::SSI is used in CGI scripts for parsing SSI directives in
-    files or string variables, and fully implements the
-    functionality of apache's mod_include module.
+    CGI::SSI is meant to be used as an easy way to filter shtml through CGI
+    scripts in a loose imitation of Apache's mod_include. If you're using
+    Apache, you may want to use either mod_include or the Apache::SSI module
+    instead of CGI::SSI. Limitations in a CGI script's knowledge of how the
+    server behaves make some SSI directives impossible to imitate from a CGI
+    script.
 
-    It is an alternative to famous Apache::SSI modules, but it
-    doesn't require mod_perl. This is an advantage to those who are
-    using public hosting services. There is a disadvantage, however
-    - the module consumes much memory, and I don't recommend using
-    it on heavy-loaded sites (currently it's being used on a site
-    with 10000 hits, and I consider this as a limit). I hope to get
-    rid of this disadvantage by the time the release comes out
-    (currently it's beta).
+    Most of the time, you'll simply want to filter shtml through STDOUT or
+    some other open filehandle. `autotie' is available for STDOUT, but in
+    general, you'll want to tie other filehandles yourself:
 
-  SSI Directives
+        $ssi = tie(*FH, 'CGI::SSI', filehandle => 'FH');
+        print FH $shtml;
 
-    This module supports the same directives as mod_include. For
-    methods listed below but not documented, please see
-    mod_include's online documentation at
-    http://httpd.apache.org/docs/mod/mod_include.html .
+    Note that you'll need to pass the name of the filehandle to `tie()' as a
+    named parameter. Other named parameters are possible, as detailed below.
+    These parameters are the same as those passed to the `new()' method.
+    However, `new()' will not tie a filehandle for you.
 
-    * config
-    * echo
-        This directive is not fully supported in current version.
+    CGI::SSI has it's own flavor of SSI. Test expressions are Perlish. You
+    may create and use multiple CGI::SSI objects; they will not step on each
+    others' variables.
 
-    * exec
-    * fsize
-    * flastmod
-    * include
-    * printenv
-    * set
-        This directive is not supported in current version.
+    Object-Oriented methods use the same general format so as to imitate SSI
+    directives:
 
-    * perl
-        This directive is not supported in current version.
+        <!--#include virtual="/foo/bar.footer" -->
 
-    * if
-    * elif
-    * else
-    * endif
-        These four directives are not supported in current version.
+      would be
 
-  Outline Usage
+        $ssi->include(virtual => '/foo/bar.footer');
 
-    First you need to load the CGI::SSI module:
+    likewise,
 
-      use CGI::SSI;
+        <!--#exec cgi="/cgi-bin/foo.cgi" -->
 
-    You need to specify the following when processing of all nested
-    directives is needed (default value - 0):
+      would be
 
-     $CGI::SSI::recursive = 1;
+        $ssi->exec(cgi => '/cgi-bin/foo.cgi');
 
-    To parse file or string you need to use:
+    Usually, if there's no chance for ambiguity, the first argument may be
+    left out:
 
-      fssi($filename);
-      sssi($string);
+        <!--#echo var="var_name" -->
 
-    The result is printed to STDOUT.
+      could be either
 
-TO DO
-    Full implementation of all SSI directives.
+        $ssi->echo(var => 'var_name');
 
-    Optimize memory consumption.
+      or
+
+        $ssi->echo('var_name');
+
+    Likewise,
+
+        $ssi->set(var => $varname, value => $value)
+
+      is the same as 
+
+        $ssi->set($varname => $value)
+
+    $ssi->new([%args])
+        Creates a new CGI::SSI object. The following are valid (optional)
+        arguments:
+
+         DOCUMENT_URI    => $doc_uri,
+         DOCUMENT_NAME   => $doc_name,
+         DOCUMENT_ROOT   => $doc_root,
+         errmsg          => $oops,
+         sizefmt         => ('bytes' || 'abbrev'),
+         timefmt         => $time_fmt,
+
+    $ssi->config($type, $arg)
+        $type is either 'sizefmt', 'timefmt', or 'errmsg'. $arg is similar
+        to those of the SSI `spec', referenced below.
+
+    $ssi->set($varname => $value)
+        Sets variables internal to the CGI::SSI object. (Not to be confused
+        with the normal variables your script uses!) These variables may be
+        used in test expressions, and retreived using $ssi->echo($varname).
+
+    $ssi->echo($varname)
+        Returns the value of the variable named $varname. Such variables may
+        be set manually using the `set()' method. There are also several
+        built-in variables:
+
+         DOCUMENT_URI  - the URI of this document
+         DOCUMENT_NAME - the name of the current document
+         DATE_GMT      - the same as 'gmtime'
+         DATE_LOCAL    - the same as 'localtime'
+         FLASTMOD      - the last time this script was modified
+
+    $ssi->exec($type, $arg)
+        $type is either 'cmd' or 'cgi'. $arg is similar to the SSI `spec'
+        (see below).
+
+    $ssi->include($type, $arg)
+        Similar to `exec', but `virtual' and `file' are the two valid types.
+
+    $ssi->flastmod($type, $filename)
+        Similar to `include'.
+
+    $ssi->fsize($type, $filename)
+        Same as `flastmod'.
+
+    $ssi->printenv
+        Returns the environment similar to Apache's mod_include.
+
+  FLOW-CONTROL METHODS
+
+    The following methods may be used to test expressions. During a `block'
+    where the test $expr is false, nothing will be returned (or printed, if
+    tied).
+
+    $ssi->if($expr)
+        The expr can be anything Perl, but care should be taken. This causes
+        problems:
+
+         $ssi->set(varname => "foo");
+         <!--#if expr="'\$varname' =~ /^foo$/" -->ok<!--#endif -->
+
+        The $varname is expanded as you would expect. (We escape it so as to
+        use the `$varname' within the CGI::SSI object, instead of that
+        within our progam.) But the `$/' inside the regex is also expanded.
+        This is fixed by escaping the `$':
+
+         <!--#if expr="'\$varname' =~ /^value\$/" -->ok<!--#endif -->
+
+        The expressions used in if and elif tags/calls are tricky due to the
+        number of escapes required. In some cases, you'll need to write
+        `\\\\' to mean `\'.
+
+    $ssi->elif($expr)
+    $ssi->else
+    $ssi->endif
+SEE ALSO
+    `Apache::SSI' and the SSI `spec' at
+    http://www.apache.org/docs/mod/mod_include.html
+
+COPYRIGHT
+    Copyright 2000 James Tolley All Rights Reserved.
+
+    This is free software. You may copy and/or modify it under the same
+    terms as perl itself.
 
 AUTHOR
-    Vadim Y. Ponomarenko, vp@istc.kiev.ua
-
-SEE ALSO
-    mod_include, perl(1).
+    James Tolley <james@jamestolley.com>
 
