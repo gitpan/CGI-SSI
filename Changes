@@ -1,5 +1,8 @@
 Revision history for Perl extension CGI::SSI.
 
+0.81  Sun Feb 09 2005
+        - minor but crucial test.pl fix
+
 0.80  Sun Jan 30 23:59:23 2005
         - improved test suite
 

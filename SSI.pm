@@ -8,7 +8,7 @@ use LWP::Simple;
 use URI;
 use Date::Format;
 
-$CGI::SSI::VERSION = '0.80';
+$CGI::SSI::VERSION = '0.81';
 
 my $debug = 0;
 
@@ -652,4 +652,4 @@ the same terms as perl itself.
 
 =head1 AUTHOR
 
-James Tolley <james@jamestolley.com>
+James Tolley <james@bitperfect.com>

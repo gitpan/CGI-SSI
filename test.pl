@@ -107,7 +107,9 @@ use_ok('CGI::SSI');
 
 {
     my $ssi = CGI::SSI->new();
-    my $html = $ssi->process(qq[<!--#exec cmd="$^X -v" -->]);
+    my $perl = $^X;
+    $perl =~ s|\\|/|g;
+    my $html = $ssi->process(qq[<!--#exec cmd="$perl -v" -->]);
     ok($html =~ /perl/i,'exec cmd');
 }
 
