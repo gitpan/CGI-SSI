@@ -1,5 +1,8 @@
 Revision history for Perl extension CGI::SSI.
 
+0.80  Sun Jan 30 23:59:23 2005
+        - improved test suite
+
 0.53  Wed Mar 14 10:07:43 2001
         - added printf support for tied filehandles
 

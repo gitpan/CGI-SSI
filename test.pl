@@ -1,27 +1,9 @@
-# Before `make install' is performed this script should be runnable with
-# `make test'. After `make install' it should work as `perl test.pl'
+use strict;
+use warnings FATAL => 'all';
 
-######################### We start with some black magic to print on failure.
+use Test::More tests => 20;
 
-# Change 1..1 below to 1..last_test_to_print .
-# (It may become useful if the test is moved to ./t subdirectory.)
-
-BEGIN { $| = 1; print "1..18\n"; }
-END {print "not ok 1\n" unless $loaded;}
-
-#use CGI::SSI;
-require "./SSI.pm";
-CGI::SSI->import;
-
-$loaded = 1;
-print "ok 1\n";
-
-######################### End of black magic.
-
-# Insert your test code below (better if it prints "ok 13"
-# (correspondingly "not ok 13") depending on the success of chunk 13
-# of the test code):
-
+use_ok('CGI::SSI');
 
 # set and echo
 
@@ -29,8 +11,7 @@ print "ok 1\n";
     my $ssi = CGI::SSI->new();
     $ssi->set(var => 'value');
     my $value = $ssi->echo('var');
-    print 'not ' unless $value eq 'value';
-    print "ok 2\n";
+    ok($value eq 'value','set/echo 1');
 }
 
 # other ways to call set and echo
@@ -39,8 +20,7 @@ print "ok 1\n";
     my $ssi = CGI::SSI->new();
     $ssi->set(var => "var2", value => "value2");
     my $value = $ssi->echo(var => 'var2');
-    print 'not ' unless $value eq 'value2';
-    print "ok 3\n";
+    ok($value eq 'value2','set/echo 2');
 }
 
 # objects don't crush each other's vars.
@@ -55,8 +35,7 @@ print "ok 1\n";
     my $value  = $ssi->echo("var");
     my $value2 = $ssi2->echo("var");
 
-    print "not " if($value ne "value" or $value2 ne "value2");
-    print "ok 4\n";
+    ok($value eq "value" && $value2 eq "value2",'data encapsulation');
 }
 
 # args to new()
@@ -70,10 +49,9 @@ print "ok 1\n";
 			    sizefmt       => "bytes",
                             timefmt       => "%B",
 			    );
-    print "not " if(   $ssi->echo("DOCUMENT_URI")  ne "doc_uri"
-		    or $ssi->echo("DOCUMENT_NAME") ne "doc_name"
-		    or $ssi->echo("DOCUMENT_ROOT") ne "/");
-    print "ok 5\n";
+    ok(   ($ssi->echo("DOCUMENT_URI")  eq "doc_uri"
+       and $ssi->echo("DOCUMENT_NAME") eq "doc_name"
+       and $ssi->echo("DOCUMENT_ROOT") eq "/"),'new()');
 }
 
 # config
@@ -94,18 +72,15 @@ print "ok 1\n";
 
     my $ssi = CGI::SSI->new();
     $ssi->config(timefmt => "%B");
-    print "not " unless $months{ $ssi->flastmod(file => $filename) };
-    print "ok 6\n";
+    ok($months{ $ssi->flastmod(file => $filename) },'config 1');
 
     $ssi->config(sizefmt => "bytes"); # TODO: combine these calls to config.
 
     my $size = $ssi->fsize(file => $filename);
-    print "not " unless $size eq int $size;
-    print "ok 7\n";
+    ok($size eq int $size,'config 2');
 
     $ssi->config(errmsg => "error"); # TODO combine config calls
-    print "not " unless $ssi->flastmod("") eq "error";
-    print "ok 8\n";
+    ok($ssi->flastmod("") eq "error",'config 3');
 
     unlink $filename;
 }
@@ -117,30 +92,23 @@ print "ok 1\n";
 {
     my $ssi = CGI::SSI->new();
     my $html = $ssi->process(q[<!--#include virtual="http://www.yahoo.com" -->]);
-    print "not " unless $html =~ /yahoo/smi;
-    print "ok 9\n";
+    ok($html =~ /yahoo/i,'include virtual');
 }
 
 # exec cgi - with different input
 
 {
     my $ssi = CGI::SSI->new();
-    my $html = $ssi->process(q[<!--#exec cgi="http://www.yahoo.com?foo=bar" -->]);
-    print "not " unless $html =~ /yahoo/smi;
-    print "ok 10\n";
+    my $html = $ssi->process(q[<!--#exec cgi="http://www.yahoo.com/" -->]);
+    ok($html =~ /yahoo/i,'exec cgi');
 }
 
 # exec cmd - with different input
 
 {
-    if(-e '/usr/bin/perl') {
-	my $ssi = CGI::SSI->new();
-	my $html = $ssi->process(q[<!--#exec cmd="/usr/bin/perl -v" -->]);
-        print "not " unless $html =~ /perl/smi;
-        print "ok 11\n";
-    } else {
-	print "skipping test on this platform.\n";
-    }
+    my $ssi = CGI::SSI->new();
+    my $html = $ssi->process(qq[<!--#exec cmd="$^X -v" -->]);
+    ok($html =~ /perl/i,'exec cmd');
 }
 
 # flastmod - different input
@@ -152,8 +120,7 @@ print "ok 1\n";
     my $ssi = CGI::SSI->new();
     $ssi->set(varname => "test");
     my $html = $ssi->process(qq[<!--#if expr="'\$varname' =~ /^TEST\$/i" -->if<!--#else -->else<!--#endif --->]);
-    print "not " unless $html eq "if";
-    print "ok 12\n";
+    ok($html eq "if",'if/else');
 }
 
 # if/elif
@@ -161,8 +128,7 @@ print "ok 1\n";
 {
     my $ssi = CGI::SSI->new();
     my $html = $ssi->process(q[<!--#if expr="my \$i = 2; \$i eq 3;" -->if<!--#elif expr="my \$j = 4; \$j == 4" -->elif<!--#endif -->]);
-    print "not " unless $html eq "elif";
-    print "ok 13\n";
+    ok($html eq "elif",'if/elif');
 }
 
 # if/elif/else
@@ -170,8 +136,7 @@ print "ok 1\n";
 {
     my $ssi = CGI::SSI->new();
     my $html = $ssi->process(q[<!--#if expr="0" -->if<!--#elif expr="'$DATE_LOCAL' !~ /\\\\S/" -->elif<!--#else -->else<!--#endif -->]);
-    print "not " unless $html eq "else";
-    print "ok 14\n";
+    ok($html eq "else",'if/elif/else');
 }
 
 ## nested ifs:
@@ -181,17 +146,16 @@ print "ok 1\n";
 {
     my $ssi = CGI::SSI->new();
     my $html = $ssi->process(q[<!--#if expr="0" -->if1<!--#if expr="1" -->if2<!--#else -->else<!--#endif --><!--#endif -->]);
-    print "not " if $html;
-    print "ok 15\n";
+    ok(!$html,'if 1');
 }
+
 
 # if true -> if false/else
 
 {
     my $ssi = CGI::SSI->new();
     my $html = $ssi->process(q[<!--#if expr="1" -->if1<!--#if expr="0" -->if2<!--#else -->else<!--#endif --><!--#endif -->]);
-    print "not " unless $html eq "if1else";
-    print "ok 16\n";
+    ok($html eq "if1else",'if 2');
 }
 
 # if true -> if true/else
@@ -199,8 +163,7 @@ print "ok 1\n";
 {
     my $ssi = CGI::SSI->new();
     my $html = $ssi->process(q[<!--#if expr="1" -->if1<!--#if expr="1" -->if2<!--#else -->else<!--#endif --><!--#endif -->]);
-    print "not " unless $html eq "if1if2";
-    print "ok 17\n";
+    ok($html eq "if1if2",'if 3');
 }
 
 # one bigger test: if true -> if false/elif true/else -> if false/*elif true*/else
@@ -208,13 +171,8 @@ print "ok 1\n";
 {
     my $ssi = CGI::SSI->new();
     my $html = $ssi->process(q[<!--#if expr="1" -->if1<!--#if expr="0" -->if2<!--#elif expr="1" -->elif1<!--#if expr="0" -->if3<!--#elif expr="1" -->elif2<!--#else -->else1<!--#endif --><!--#else -->else2<!--#endif --><!--#endif -->]);
-    print "not " unless $html eq "if1elif1elif2";
-    print "ok 18\n";
+    ok($html eq "if1elif1elif2",'if/elif/else');
 }
-
-## end nested ifs tests
-
-__END__
 
 # derive a class, and do something simple (empty class)
 
@@ -226,8 +184,7 @@ __END__
 
     my $empty = CGI::SSI::Empty->new();
     my $html = $empty->process(q[<!--#set var="varname" value="foo" --><!--#echo var="varname" -->]);
-    print "not " unless $html eq "foo";
-    print "ok 19\n";
+    ok($html eq "foo",'inherit 1');
 }
 
 # derive a class, and do something simple (altered class)
@@ -244,10 +201,11 @@ __END__
 
     my $echo = CGI::SSI::UCEcho->new();
     my $html = $echo->process(q[<!--#set var="varname" value="foo" --><!--#echo var="varname" -->]);
-    print "not " unless $html eq "FOO";
-    print "ok 20\n";
+    ok($html eq "FOO",'inherit 2');
 }
 
 # autotie ?
 # tie by hand
 
+
+__END__

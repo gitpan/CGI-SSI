@@ -8,7 +8,7 @@ use LWP::Simple;
 use URI;
 use Date::Format;
 
-$CGI::SSI::VERSION = '0.53';
+$CGI::SSI::VERSION = '0.80';
 
 my $debug = 0;
 
