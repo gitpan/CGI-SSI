@@ -18,6 +18,8 @@ print "ok 1\n";
 # (correspondingly "not ok 13") depending on the success of chunk 13
 # of the test code):
 
+# set and echo
+
 my $ssi = CGI::SSI->new();
 $ssi->set(var => 'value');
 my $value = $ssi->echo('var');

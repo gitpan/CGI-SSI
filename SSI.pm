@@ -1,36 +1,29 @@
 package CGI::SSI;
 use strict;
 
-$CGI::SSI::VERSION = '0.01';
+use HTML::SimpleParse;
+use File::Spec;
+use FindBin;
+use LWP::Simple;
+use URI;
+use Date::Format;
 
-#use Socket;
-#use URI::Escape;
-#use Date::Format;
-#use FindBin;
-#use File::Spec;
+$CGI::SSI::VERSION = '0.10';
 
-#
-# Note: this module uses the above modules to process certain ssi directives.
-# These modules are not use'd here because they are not always needed; we
-# will only load them if necessary. If any of these modules are unavailable, 
-# the relevant directives will fail, returning the current config errmsg.
-# The rest of the module will work fine.
-#
+my $debug = 0;
 
-########### tie some vars for accuracy and ease.
-my $gmt;
-my $loc;
-
+######### tie some vars for ease and precision
+my($gmt,$loc);
 tie $gmt,'CGI::SSI::Gmt';
 tie $loc,'CGI::SSI::Local';
-###########
+#########
 
 sub import {
-    my($class, %args) = @_;
-    return unless $args{'autotie'};
-    my $filehandle = $args{'autotie'} =~ /::/ ? $args{'autotie'} : (caller())[0].'::'.$args{'autotie'};
+    my($class,%args) = @_;
+    return unless defined $args{'autotie'};
+    $args{'filehandle'} = $args{'autotie'} =~ /::/ ? $args{'autotie'} : caller().'::'.$args{'autotie'};
     no strict 'refs';
-    my $self = tie(*{$filehandle},$class,%args, filehandle => $filehandle);
+    my $self = tie(*{$args{'filehandle'}},$class,%args);
     return $self;
 }
 
@@ -38,24 +31,30 @@ sub new {
     my($class,%args) = @_;
     my $self = bless {}, $class;
 
-    $self->{'_handle'}          = undef;
-    $self->{'_variables'}       = {
-        DOCUMENT_URI    =>  $args{'DOCUMENT_URI'}  || $ENV{'SCRIPT_NAME'},
+    $self->{'_handle'}        = undef;
+
+    my $script_name = '';
+    if(exists $ENV{'SCRIPT_NAME'}) {
+	($script_name) = $ENV{'SCRIPT_NAME'} =~ /([^\/]+)$/;
+    }
+
+    $self->{'_variables'}     = {
+        DOCUMENT_URI    =>  ($args{'DOCUMENT_URI'} || $ENV{'SCRIPT_NAME'}),
         DATE_GMT        =>  $gmt,
         DATE_LOCAL      =>  $loc,
-        LAST_MODIFIED   =>  $self->flastmod('file', $ENV{'SCRIPT_FILENAME'} || $ENV{'PATH_TRANSLATED'}),
-        DOCUMENT_NAME   =>  $args{'DOCUMENT_NAME'} || ($ENV{'SCRIPT_NAME'} =~ /([^\/]+)$/)[0],
-                                  };
-    $self->{'_config'}          = {
+        LAST_MODIFIED   =>  $self->flastmod('file', $ENV{'SCRIPT_FILENAME'} || $ENV{'PATH_TRANSLATED'} || ''),
+        DOCUMENT_NAME   =>  ($args{'DOCUMENT_NAME'} || $script_name),
+                                };
+
+    $self->{'_config'}        = {
         errmsg  =>  '[an error occurred while processing this directive]',
         sizefmt =>  'abbrev',
-        timefmt =>  undef, # the current locale's default
-                                  };
-    $self->{'_in_if'}           = 0;
-    $self->{'_seen_true'}       = 0;
-    $self->{'_suspend'}         = [];
-    $self->{'_seen_true'}       = [];
-    $self->{'_cache'}           = '';
+        timefmt =>  undef,
+                                };
+
+    $self->{'_in_if'}     = 0;
+    $self->{'_suspend'}   = [0];
+    $self->{'_seen_true'} = [1];
 
     return $self;
 }
@@ -63,369 +62,199 @@ sub new {
 sub TIEHANDLE {
     my($class,%args) = @_;
     my $self = $class->new(%args);
-
-    $self->{'_handle'} = do { local *FH };
-    my $handle_to_copy;
-    if($args{'filehandle'}) {
-        $handle_to_copy = $args{'filehandle'} =~ /::/ ? $args{'filehandle'} : (caller())[0].'::'.$args{'filehandle'};
+    $self->{'_handle'} = do { local *STDOUT };
+    my $handle_to_tie = '';
+    if($args{'filehandle'} !~ /::/) {
+	$handle_to_tie = caller().'::'.$args{'filehandle'};
     } else {
-        $handle_to_copy = 'main::STDOUT';
+	$handle_to_tie = $args{'filehandle'};
     }
-    open($self->{'_handle'},">&$handle_to_copy") or die "Could not copy the filehandle $handle_to_copy: $!";
+    open($self->{'_handle'},'>&'.$handle_to_tie) or die "Failed to copy the filehandle ($handle_to_tie): $!";
     return $self;
 }
 
-sub PRINT { # TODO return value.
+sub PRINT {
     my($self,@shtml) = @_;
-    for my $shtml (@shtml) {
-        print {$self->{'_handle'}} $self->process($shtml);
-    }
+    print {$self->{'_handle'}} map { $self->process($_) } @shtml;
 }
 
 sub process {
-    local $^W = 0; # ?? TODO
     my($self,@shtml) = @_;
+    print main::STDERR "###processing:\n",join("\n",@shtml),"\n" if $debug;
     my $processed = '';
-        # TODO - do we want/need this complexity/feature?
-    @shtml = split(/((?:<!--#\S+(?:\s*[^=\s]+="(?:\\"|[^"])*")*\s*-->)|(?:<!--#\S+(?:\s*[^=\s]+='(?:\\'|[^'])*')*\s*-->))/,
-        $self->_get_cache().join('',@shtml));
-    while(@shtml) {
-        my $html = shift(@shtml);
-        if(@shtml) { # there's more left.
-            $processed .= $html;
-        } else { # this is the last one, so let's see if there's anything to cache.
-            if($html =~ /^(.*)(<[^>]*)$/) { # TODO - is this accurate?
-                $processed .= $1;
-                $self->_set_cache($2);
-            } else {
-                $processed .= $html;
-            }
-        }
-        $processed .= $self->_process_ssi_token(shift(@shtml)) if @shtml; # there's nothing uninitialized here, is there?
+    @shtml = split(/(<!--#.+?-->)/,join '',@shtml);
+    for my $token (@shtml) {
+	next unless(defined $token and length $token);
+        if($token =~ /^<!--#(.+?)\s*-->$/) {
+	    $processed .= $self->_process_ssi_text($self->_interp_vars($1));
+	} else {
+	    next if $self->_suspended;
+	    $processed .= $token;
+	}
     }
     return $processed;
 }
 
-sub _process_ssi_token {
-    my($self,$token) = @_;
-
-    $token =~ /^<!--#\s*(\S+)\s*(.*?)\s*-->$/sm;
-    my $method = lc $1;
-    my $argument_string = $2; # could be empty.
-
-    my %arguments = ();
-    # parse the arguments.
-    while($argument_string) {
-        if($argument_string =~ s/^\s*(\S+?)="((?:\\"|[^"])*)"//sm) { # double quotes
-            my $name = $1;
-            $arguments{$name} = $2;
-            $arguments{$name} =~ s/\\"/"/g;
-        } elsif($argument_string =~ s/^\s*(\S+?)='((?:\\'|[^'])*)'//sm) { # single quotes
-            my $name = $1;
-            $arguments{$name} = $2;
-            $arguments{$name} =~ s/\\'/'/g;
-        } else {
-            return $self->{'_config'}->{'errmsg'}; # there's a problem - this should not happen.
-        }
-    }
-    %arguments = $self->_interpolate_variables(%arguments);
-    my $retval = eval { $self->$method(%arguments) }; # TODO - replace this eval with AUTOLOAD.
-    return $self->{'_config'}->{'errmsg'} if $@;
-    return $retval;
+sub _process_ssi_text {
+    my($self,$text) = @_;
+    return '' if($self->_suspended and $text !~ /^(?:if|else|elif|endif)\b/);
+    return $self->{'_config'}->{'errmsg'} unless $text =~ s/^(\S+)\s*//;
+    my $method = $1;
+    print main::STDERR "###calling $method($text)\n" if $debug;
+    return $self->$method( HTML::SimpleParse->parse_args($text) );
 }
 
-sub _interpolate_variables { # done.
-    my($self,%args) = @_;
-    my %interpolated = ();
-    for my $key (keys %args) {
-        $interpolated{$key} = $args{$key} and next if $key eq 'var'; # only do the values.
-        my $value = $args{$key};
-        my $new_value = '';
-        if($self->echo(var => $value) ne '(none)') { # but then you can't have '(none)' as a valid value(?). TODO
-            $new_value = $self->echo(var => $value);
-        } elsif($value =~ /^\${(?:\\}|[^}])+}$/) { # don't interpolate "${DATE_LOCAL}"(?)
-            $new_value = $value;
-        } else {
-            while($value) {
-                if($value =~ s/^\$([^{]\S*)//) { # var without {}
-                    my $tmp = $self->echo(var => $1);
-                    if($tmp ne '(none)') {
-                        $new_value .= $tmp;
-                    }
-                } elsif($value =~ s/^\${((?:\\}|[^}])+)}//) { # var with {}
-                    my $tmp = $self->echo(var => $1);
-                    if($tmp ne '(none)') {
-                        $new_value .= $tmp;
-                    }
-                } elsif($value =~ s/^((?:\\\$|\\[^\$]|[^\\\$]|\$$)+)//) { # everything but the start of a variable.
-                    # the above regex: one or more of the following: '\$' or '\[^$]' or [^\\] or [^\$] or \\end or $end.
-                    $new_value .= $1; # get the rest - no more vars here.
-                }
-            }
-        }
-        $interpolated{$key} = $new_value;
-    }
-    return %interpolated;
+# many thanks to Apache::SSI
+sub _interp_vars {
+    local $^W = 0;
+    my($self,$text) = @_;
+    my($a,$b,$c) = ('','','');
+    $text =~ s{ (^|[^\\]) (\\\\)* \$(?:\{)?(\w+)(?:\})? }
+              {($a,$b,$c)=($1,$2,$3); $a . substr($b,length($b)/2) . $self->_echo($c) }exg;
+    return $text;
 }
 
-################ expression test methods.
-
-sub _test {
-    my($self,$expr) = @_;
-    my $retval = eval($expr); # possibly poor security. TODO
-    return $self->{'_config'}->{'errmsg'} if $@;
-    return $retval;
+# for internal use only
+sub _echo {
+    my($self,$key,$var) = @_;
+    $var = $key if @_ == 2;
+    return $self->{'_variables'}->{$var} if exists $self->{'_variables'}->{$var};
+    return $ENV{$var} if exists $ENV{$var};
+    return $var;
 }
 
-################ if/elif/else/endif/etc methods.
-
-sub _entering_if {
-    my $self = shift();
-    $self->{'_in_if'}++;
-    $self->{'_suspend'}->[$self->{'_in_if'}] = $self->{'_suspend'}->[$self->{'_in_if'} - 1];
-    $self->{'_seen_true'}->[$self->{'_in_if'}] = 0;
-}
-
-sub _seen_true {
-    my $self = shift();
-    return $self->{'_seen_true'}->[$self->{'_in_if'}];
-}
-
-sub _suspended {
-    my $self = shift();
-    return $self->{'_suspend'}->[$self->{'_in_if'}];
-}
-
-sub _leaving_if {
-    $_[0]->{'_in_if'}--;
-}
-
-sub _true {
-    my $self = shift();
-    $self->{'_seen_true'}->[$self->{'_in_if'}]++;
-}
-
-sub _suspend {
-    my $self = shift();
-    $self->{'_suspend'}->[$self->{'_in_if'}]++;
-}
-
-sub _resume {
-    my $self = shift();
-    $self->{'_suspend'}->[$self->{'_in_if'}]--;
-}
-
-sub _in_if {
-    return $_[0]->{'_in_if'};
-}
-
-sub if {
-    my($self,$key,$expr) = @_;
-    $expr = $key if @_ == 2; # flexible interface.
-    $self->_entering_if();
-    if($self->_test($expr)) {
-        $self->_true();
-    } else {
-        $self->_suspend();
-    }
-    return;
-}
-
-sub elif {
-    my($self,$key,$expr) = @_;
-    die "incorrect use of 'elif' ssi directive: no preceding 'if'." unless $self->_in_if();
-    $expr = $key if @_ == 2 ; # flexible interface.
-    if(! $self->_seen_true() and $self->_test($expr)) {
-        $self->_true();
-        $self->_resume();
-    } else {
-        $self->_suspend() unless $self->_suspended();
-    }
-    return;
-}
-
-sub else {
-    my $self = shift();
-    die "incorrect use of 'else' ssi directive: no preceding 'if'." unless $self->_in_if();
-    unless($self->_seen_true()) {
-        $self->_resume();
-    } else {
-        $self->_suspend() unless $self->_suspended();
-    }
-    return;
-}
-
-sub endif {
-    my($self) = shift;
-    die "incorrect use of 'endif' ssi directive: no preceding 'if'." unless $self->_in_if();
-    $self->_leaving_if();
-    $self->_resume() if $self->_suspended();
-    return;
-}
-
-##################### cache methods.
-
-sub _set_cache { # done.
-    my($self,$cache) = @_;
-    $self->{'_cache'} = $cache;
-}
-
-sub _get_cache { # done.
-    my($self) = @_;
-    my $tmp = $self->{'_cache'};
-    $self->{'_cache'} = '';
-    return $tmp;
-}
-
-######################### following are the ssi directive routines.
+#
+# ssi directive methods
+#
 
 sub config {
     my($self,%args) = @_;
     if(exists $args{'timefmt'}) {
-        $self->{'_config'}->{'timefmt'} = $args{'timefmt'};
+	$self->{'_config'}->{'timefmt'} = $args{'timefmt'};
     } elsif(exists $args{'sizefmt'}) {
-        if($args{'sizefmt'} eq 'abbrev') {
-            $self->{'_config'}->{'sizefmt'} = 'abbrev';
-        } elsif($args{'sizefmt'} eq 'bytes') {
-            $self->{'_config'}->{'sizefmt'} = 'bytes';
-        } else {
-            return $self->{'_config'}->{'errmsg'};
-        }
-    } elsif(exists $args{'errmsg'}) { # errmsg
-        $self->{'_config'}->{'errmsg'} = $args{'errmsg'};
+	if($args{'sizefmt'} eq 'abbrev') {
+	    $self->{'_config'}->{'sizefmt'} = 'abbrev';
+	} elsif($args{'sizefmt'} eq 'bytes') {
+	    $self->{'_config'}->{'sizefmt'} = 'bytes';
+	} else {
+	    return $self->{'_config'}->{'errmsg'};
+	}
+    } elsif(exists $args{'errmsg'}) {
+	$self->{'_config'}->{'errmsg'} = $args{'errmsg'};
     } else {
-        return $self->{'_config'}->{'errmsg'};
+	return $self->{'_config'}->{'errmsg'};
     }
-    return;
+    return '';
 }
 
 sub set {
-    my($self, %args) = @_;
+    my($self,%args) = @_;
     if(scalar keys %args > 1) {
-        $self->{'_variables'}->{$args{'var'}} = $args{'value'};
-    } else { # there's one key, so it must be var => value notation.
-        $self->{'_variables'}->{(keys %args)[0]} = (values %args)[0];
+	$self->{'_variables'}->{$args{'var'}} = $args{'value'};
+    } else { # var => value notation
+	$self->{'_variables'}->{(keys %args)[0]} = (values %args)[0];
     }
-    return;
+    return '';
 }
 
 sub echo {
-    my($self, @args) = @_;
-    if(@args > 1) {
-        my %args = @args;
-        return $self->{'_variables'}->{$args{'var'}} if exists $self->{'_variables'}->{$args{'var'}};
-        return $ENV{$args{'var'}} if exists $ENV{$args{'var'}};
-    } else { # $args[0] is the name of the var to echo.
-        return $self->{'_variables'}->{$args[0]} if exists $self->{'_variables'}->{$args[0]};
-        return $ENV{$args[0]} if exists $ENV{$args[0]};
-    }
-    return '(none)'; # default.
+    my($self,$key,$var) = @_;
+    $var = $key if @_ == 2;
+    return $self->{'_variables'}->{$var} if exists $self->{'_variables'}->{$var};
+    return $ENV{$var} if exists $ENV{$var};
+    return '';
 }
 
 sub printenv {
-    my $self = shift();
-    my $str = '';
-    for my $key (keys %ENV) {
-        $str .= $key."=".$ENV{$key}."<br>\n";
-    }
-    return $str;
-}
-
-sub _include_virtual {
-    my($self,$filename) = @_;
-    $filename =~ s/^$ENV{'DOCUMENT_ROOT'}\///i;
-
-    my $host = '';
-    my $port = 0;
-
-    if($filename !~ m|^http://|) { # use this host
-        $host = lc($ENV{'HTTP_HOST'} || $ENV{'SERVER_NAME'});
-        $host =~ /^(.+)$/; # untaint. TODO. make sure this is the localhost?
-        $host = $1;
-    } else { # other host - parse the host info.
-        $filename =~ s|^http://([^:/]+):?(\d+)?||;
-        $host = $1;
-        $port = $2;
-    }
-
-    eval{ require LWP::Simple };
-    unless($@) {
-        return LWP::Simple::get('http://'.$host.$filename);
-    }
-        #
-        # no LWP, so use Socket.
-        #
-    eval { require Socket };
-    return $self->{'_config'}->{'errmsg'} if $@;
-
-    $port = getservbyname('http','tcp') unless $port;
-
-    my $iaddr = Socket::inet_aton($host)               or return $self->{'_config'}->{'errmsg'};
-    my $paddr = Socket::sockaddr_in($port, $iaddr);
-    my $proto = getprotobyname('tcp');
-
-    my $h = do { local *FH };
-
-    socket($h, Socket::PF_INET(), Socket::SOCK_STREAM(), $proto)   
-                                                       or return $self->{'_config'}->{'errmsg'};
-    connect($h, $paddr)                                or return $self->{'_config'}->{'errmsg'};
-
-    select((select($h),$|++)[0]);
-
-    binmode($h);
-
-    print $h join("\015\012" =>
-            "GET $filename HTTP/1.0",
-            "Host: $host",
-            "User-Agent: CGI-SSI/$CGI::SSI::VERSION",
-            "","");
-
-    my $return_text = '';
-    my $bytes_read = 0;
-    1 while $bytes_read = sysread($h, $return_text, 8*1024, length($return_text));
-    #return $self->{'_config'}->{'errmsg'} unless defined($bytes_read);
-
-    close($h); # should probably check this, but do I really want to return an error here? TODO
-
-    $return_text =~ /^HTTP\/\d\.\d\s+2/ or return $self->{'_config'}->{'errmsg'};
-    $return_text =~ s/.+?\015?\012\015?\012//s;
-
-    return $return_text;
+    #my $self = shift;
+    return join "\n",map {"$_=$ENV{$_}"} keys %ENV; 
 }
 
 sub include {
     my($self,$type,$filename) = @_;
     if($type eq 'file') {
-        $filename = $self->_get_absolute($filename) unless(-e $filename);
-        return $self->_include_file($filename);
-    } else { # virtual
-        return $self->_include_virtual($filename);
+	return $self->_include_file($filename);
+    } elsif($type eq 'virtual') {
+	return $self->_include_virtual($filename);
+    } else {
+	return $self->{'_config'}->{'errmsg'};
     }
 }
 
 sub _include_file {
     my($self,$filename) = @_;
-    return $self->{'_config'}->{'errmsg'} unless(-e $filename);
+    $filename = File::Spec->catfile($FindBin::Bin,$filename) unless -e $filename;
+    my $fh = do { local *STDIN };
+    open($fh,$filename) or return $self->{'_config'}->{'errmsg'};
+    return join '',<$fh>;
+}
 
-    my $file = do { local *FH };
-    open($file,$filename) or return $self->{'_config'}->{'errmsg'};
-    return join('',<$file>);
+sub _include_virtual {
+    my($self,$filename) = @_;
+    my $response = undef;
+    eval {
+	my $uri = URI->new($filename);
+	$uri->scheme($uri->scheme || 'http'); # ??
+	$uri->host($uri->host || $ENV{'HTTP_HOST'} || $ENV{'SERVER_NAME'});
+	$response = get $uri->canonical;
+    };
+    return $self->{'_config'}->{'errmsg'} if $@;
+    return $self->{'_config'}->{'errmsg'} unless defined $response;
+    return $response;
 }
 
 sub exec {
     my($self,$type,$filename) = @_;
-    if($type eq 'cgi') {
-        my $resource = $self->_get_virtual($filename).$ENV{'PATH_INFO'};
-        $resource .= '?'.$ENV{'QUERY_STRING'} if $ENV{'QUERY_STRING'};
-        return $self->_include_virtual($resource);
-    } else { # cmd
-        ($ENV{'PATH'}) = $ENV{'PATH'} =~ /^(.*)$/;
-        my $output = `$filename`; # security here is mighty bad. TODO?
-        if(! $?) {
-            return $output;
-        } else {
-            return $self->{'_config'}->{'errmsg'};
-        }
+    if($type eq 'cmd') {
+	return $self->_exec_cmd($filename);
+    } elsif($type eq 'cgi') {
+	return $self->_exec_cgi($filename);
+    } else {
+	return $self->{'_config'}->{'errmsg'};
+    }
+}
+
+sub _exec_cmd {
+    my($self,$filename) = @_;
+    my $output = `$filename`; # security here is mighty bad.
+    return $self->{'_config'}->{'errmsg'} if $?;
+    return $output;
+}
+
+sub _exec_cgi { # no relative $filename allowed.
+    my($self,$filename) = @_;
+    my $response = undef;
+    eval {
+	my $uri = URI->new($filename);
+	$uri->scheme($uri->scheme || 'http');
+	$uri->host($uri->host || $ENV{'HTTP_HOST'} || $ENV{'SERVER_NAME'});
+	$uri->query($uri->query || $ENV{'QUERY_STRING'});
+	$response = get $uri->canonical;
+    };
+    return $self->{'_config'}->{'errmsg'} if $@;
+    return $self->{'_config'}->{'errmsg'} unless defined $response;
+    return $response;
+}
+
+sub flastmod {
+    my($self,$type,$filename) = @_;
+
+    if($type eq 'file') {
+	$filename = File::Spec->catfile($FindBin::Bin,$filename) unless -e $filename;
+    } elsif($type eq 'virtual') {
+	$filename = File::Spec->catfile($ENV{'DOCUMENT_ROOT'},$filename) unless $filename =~ /$ENV{'DOCUMENT_ROOT'}/;
+    } else {
+	return $self->{'_config'}->{'errmsg'};
+    }
+    return $self->{'_config'}->{'errmsg'} unless -e $filename;
+
+    my $flastmod = (stat $filename)[9];
+    
+    if($self->{'_config'}->{'timefmt'}) {
+	my @localtime = localtime($flastmod); # need this??
+	return Date::Format::strftime($self->{'_config'}->{'timefmt'},@localtime);
+    } else {
+	return scalar localtime($flastmod);
     }
 }
 
@@ -433,107 +262,141 @@ sub fsize {
     my($self,$type,$filename) = @_;
 
     if($type eq 'file') {
-        $filename = $self->_get_absolute($filename);
+	$filename = File::Spec->catfile($FindBin::Bin,$filename) unless -e $filename;
+    } elsif($type eq 'virtual') {
+	$ENV{'DOCUMENT_ROOT'} ||= '';
+	$filename = File::Spec->catfile($ENV{'DOCUMENT_ROOT'},$filename) unless $filename =~ /$ENV{'DOCUMENT_ROOT'}/;
     } else {
-        $filename = $self->_get_absolute_from_virtual($self->_get_virtual($filename));
+	return $self->{'_config'}->{'errmsg'};
     }
-    return $self->{'_config'}->{'errmsg'} unless(-e $filename);
+    return $self->{'_config'}->{'errmsg'} unless -e $filename;
 
-    my $fsize = (stat($filename))[7];
+    my $fsize = (stat $filename)[7];
+    
     if($self->{'_config'}->{'sizefmt'} eq 'bytes') {
-        1 while $fsize =~ s/^(\d+)(\d{3})/$1,$2/g;		
-        return $fsize;
-    } else {
-        # gratefully lifted from Apache::SSI.
-        return "   0k" unless $fsize;
-        return "   1k" if $fsize < 1024;
-        return sprintf("%4dk", ($fsize + 512)/1024) if $fsize < 1048576;
-        return sprintf("%4.1fM", $fsize/1048576.0)  if $fsize < 103809024;
-        return sprintf("%4dM", ($fsize + 524288)/1048576);
+	1 while $fsize =~ s/^(\d+)(\d{3})/$1,$2/g;
+	return $fsize;
+    } else { # abbrev
+	# gratefully lifted from Apache::SSI
+	return "   0k" unless $fsize;
+	return "   1k" if $fsize < 1024;
+	return sprintf("%4dk", ($fsize + 512)/1024) if $fsize < 1048576;
+	return sprintf("%4.1fM", $fsize/1048576.0) if $fsize < 103809024;
+	return sprintf("%4dM", ($fsize + 524288)/1048576) if $fsize < 1048576;
     }
 }
 
-sub flastmod {
-    my($self,$type,$filename) = @_;
+#
+# if/elsif/else/endif and related methods
+#
 
-    if($type eq 'file') {
-        $filename = $self->_get_absolute($filename);
-    } else { # virtual
-        $filename = $self->_get_absolute_from_virtual($self->_get_virtual($filename));
-    }
-    return $self->{'_config'}->{'errmsg'} unless(-e $filename);
-
-    my $flastmod = (stat($filename))[9];
-    if(! $self->{'_config'}->{'timefmt'}) { # undef by default
-        return scalar localtime($flastmod);
-    } else {
-        eval { require Date::Format };
-        return $self->{'_config'}->{'errmsg'} if $@;
-        my @localt = localtime($flastmod); # is this really necessary? TODO
-        return Date::Format::strftime($self->{'_config'}->{'timefmt'},\@localt);
-    }
+sub _test {
+    my($self,$test) = @_;
+    my $retval = eval($test);
+    print main::STDERR "###the test ($test) was true.\n"  if $debug and $retval;
+    print main::STDERR "###the test ($test) was false.\n" if $debug and not $retval;
+    return undef if $@;
+    return defined $retval ? $retval : 0;
 }
 
-sub _get_absolute_from_virtual {
-    my($self,$filename) = @_;
-    my $absolute = '';
-    $filename =~ s|^\/||;
-    my $path = $ENV{'DOCUMENT_ROOT'};
-
-    eval { require File::Spec };
-    return if $@;
-
-    eval { require File::Basename };
-    return if $@;
-    $absolute = File::Spec->catfile($path,$filename);
-    return $absolute if -e $absolute;
-
-    $absolute = File::Spec->catfile(File::Basename::dirname($path),$filename);
-    return $absolute if -e $absolute;
-
-    return;
-}
-
-sub _get_virtual { # filename
-    my($self,$filename) = @_;
-    my $return_filename = '';
-
-    return $filename if(-e $filename); # do we need this? TODO
-
-    eval { require File::Spec };
-    return $self->{'_config'}->{'errmsg'} if $@;
-
-    $return_filename = File::Spec->catfile($ENV{'DOCUMENT_ROOT'}, $filename);
-    return $return_filename if(-e $return_filename);
-
-    eval { require FindBin };
-    return $self->{'_config'}->{'errmsg'} if $@;
-
-    $return_filename = File::Spec->catfile($FindBin::Bin, $filename);
-    return $return_filename if(-e $return_filename);
-
-    return $filename;
-}
-
-sub _get_absolute { # filename
-    my($self,$filename) = @_; # $type is 'file'
-
-    return $filename if(-e $filename);
-
-    eval { require File::Spec };
-    return if $@;
-
-    eval { require FindBin };
-    return if $@;
-
-    $filename = File::Spec->catfile($FindBin::Bin, $filename);
-    return $filename;
-}
-
-sub DESTROY {
+sub _entering_if {
     my $self = shift;
-    print {$self->{'_handle'}} $self->_get_cache() if $self->{'_handle'};
+    $self->{'_in_if'}++;
+    $self->{'_suspend'}->[$self->{'_in_if'}] = $self->{'_suspend'}->[$self->{'_in_if'} - 1];
+    $self->{'_seen_true'}->[$self->{'_in_if'}] = 0;
 }
+
+sub _seen_true {
+    my $self = shift;
+    return $self->{'_seen_true'}->[$self->{'_in_if'}];
+}
+
+sub _suspended {
+    my $self = shift;
+    return $self->{'_suspend'}->[$self->{'_in_if'}];
+}
+
+sub _leaving_if {
+    my $self = shift;
+    $self->{'_in_if'}-- if $self->{'_in_if'};
+}
+
+sub _true {
+    my $self = shift;
+    return $self->{'_seen_true'}->[$self->{'_in_if'}]++;
+}
+
+sub _suspend {
+    my $self = shift;
+    $self->{'_suspend'}->[$self->{'_in_if'}]++;
+}
+
+sub _resume {
+    my $self = shift;
+    $self->{'_suspend'}->[$self->{'_in_if'}]--
+	if $self->{'_suspend'}->[$self->{'_in_if'}];
+}
+
+sub _in_if {
+    my $self = shift;
+    return $self->{'_in_if'};
+}
+
+sub if {
+    my($self,$expr,$test) = @_;
+    print main::STDERR "###entering if()\n" if $debug;
+    $expr = $test if @_ == 3;
+    $self->_entering_if();
+    if($self->_test($expr)) {
+	$self->_true();
+    } else {
+	$self->_suspend();
+    }
+    print main::STDERR "###leaving if(), and we're ".($self->_suspended() ? "":"not ")."suspended.\n" if $debug;
+    return '';
+}
+
+sub elif {
+    my($self,$expr,$test) = @_;
+    die "Incorrect use of elif ssi directive: no preceeding 'if'." unless $self->_in_if();
+    print main::STDERR "###entering elif()\n" if $debug;
+    $expr = $test if @_ == 3;
+    if(! $self->_seen_true() and $self->_test($expr)) {
+	$self->_true();
+	$self->_resume();
+    } else {
+	$self->_suspend() unless $self->_suspended();
+    }
+    print main::STDERR "###leaving elif(), and we're ".($self->_suspended() ? "":"not ")."suspended.\n" if $debug;
+    return '';
+}
+
+sub else {
+    my $self = shift;
+    die "Incorrect use of else ssi directive: no preceeding 'if'." unless $self->_in_if();
+    print main::STDERR "###entering else()\n" if $debug;
+    unless($self->_seen_true()) {
+	$self->_resume();
+    } else {
+	$self->_suspend();
+    }
+    print main::STDERR "###leaving else(), and we're ".($self->_suspended() ? "":"not ")."suspended.\n" if $debug;
+    return '';
+}
+
+sub endif {
+    my $self = shift;
+    die "Incorrect use of endif ssi directive: no preceeding 'if'." unless $self->_in_if();
+    print main::STDERR "###entering endif()\n" if $debug;
+    $self->_leaving_if();
+    $self->_resume() if $self->_suspended();
+    print main::STDERR "###leaving endif(), and we're ".($self->_suspended() ? "":"not ")."suspended.\n" if $debug;
+    return '';
+}
+
+#
+# packages for tie()
+#
 
 package CGI::SSI::Gmt;
 
@@ -549,151 +412,210 @@ sub FETCH { localtime() }
 1;
 __END__
 
+
 =head1 NAME
 
-CGI::SSI - Use SSI from CGI scripts
+ CGI::SSI - Use SSI from CGI scripts
 
 =head1 SYNOPSIS
 
-    # autotie STDOUT or any other open filehandle
+ #autotie STDOUT or any other open filehandle
 
-    use CGI::SSI (autotie => 'STDOUT');
+   use CGI::SSI (autotie => STDOUT);
 
-    print $shtml; # browser sees resulting HTML
+   print $shtml; # browser sees resulting HTML
 
-    # or tie it yourself to any filehandle.
+ # or tie it yourself to any filehandle
 
-    use CGI::SSI;
+   use CGI::SSI;
 
-    open(FILE,"$html_file")    or die $!;
-    my $ssi = tie(*FILE,'CGI::SSI', filehandle => 'FILE')
-            or die 'no tie';
-    print FILE $shtml; # HTML arrives in the file
+   open(FILE,'+>'.$html_file) or die $!;
+   $ssi = tie(*FILE, 'CGI::SSI', filehandle => 'FILE');
+   print FILE $shtml; # HTML arrives in the file
 
-    # or use the Object-Oriented interface:
+ # or use the object-oriented interface
 
-    my $ssi = CGI::SSI->new();
+   use CGI::SSI;
 
-    $ssi->if($expr);
-        $html .= $ssi->process($shtml);
-    $ssi->else();
-        $html .= $ssi->process($shtml2);
-    $ssi->endif();
+   $ssi = CGI::SSI->new();
 
-    print $ssi->include($type, $path);
-    print $ssi->flastmod($filename);
+   $ssi->if('"$varname" =~ /^foo/');
+      $html .= $ssi->process($shtml);
+   $ssi->else();
+      $html .= $ssi->include(file => $filename);
+   $ssi->endif();
 
-    # or roll your own favorite flavor of SSI:
+   print $ssi->exec(cgi => $url);
+   print $ssi->flastmod(file => $filename);
 
-    package CGI::SSI::MySSI;
-    use CGI::SSI;
-    @CGI::SSI::MySSI::ISA = qw(CGI::SSI);
+ #
+ # or roll your own favorite flavor of SSI
+ #
 
-    sub include {
-        my($self,$type,$arg) = @_; # $type is 'file' or 'virtual'
-        # my idea of include goes something like this...
-        return $html;
-    }
-    1;
+   package CGI::SSI::MySSI;
+   use CGI::SSI;
+   @CGI::SSI::MySSI::ISA = qw(CGI::SSI);
+
+   sub include {
+      my($self,$type,$file_or_url) = @_; 
+      # my idea of include goes something like this...
+      return $html;
+   }
+   1;
+   __END__
 
 =head1 DESCRIPTION
 
-C<CGI::SSI> has it's own flavor of SSI. Test expressions are Perlish.
-You may create and use multiple CGI::SSI objects. They will not step on
-each other's variables.
+CGI::SSI is meant to be used as an easy way to filter shtml 
+through cgi scripts in a loose imitation of Apache's mod_include. 
+If you're using Apache, you may want to use either mod_include or 
+the Apache::SSI module instead. Due to limitations in a CGI 
+script's knowledge of how the server behaves makes some SSI
+directives impossible to imitate from a CGI script.
 
-You can either tie (or autotie) a filehandle, or use the following
-interface methods. When STDOUT is tied, printing shtml will result in
-the browser seeing the result of ssi processing.
+Most of the time, you'll simply want to filter shtml through STDOUT 
+or some other open filehandle. C<autotie> is available for STDOUT, 
+but in general, you'll want to tie other filehandles yourself:
 
-If you are going to tie a filehandle manually, you need to pass the name
-of the filehandle to C<CGI::SSI> like so:
+    $ssi = tie *FH, 'CGI::SSI', filehandle => 'FH';
+    print FH $shtml;
 
-tie(*FH,'CGI::SSI', filehandle => 'FH');
+Note that you'll need to pass the name of the filehandle to C<tie()> as 
+a named parameter. Other named parameters are possible, as detailed 
+below. These parameters are the same as those passed to the C<new()> 
+method. However, C<new()> will not tie a filehandle.
+
+CGI::SSI has it's own flavor of SSI. Test expressions are Perlish. 
+You may create and use multiple CGI::SSI objects; they will not 
+step on each others' variables.
+
+Object-Oriented methods use the same general format so as to imitate 
+SSI directives:
+
+    <!--#include virtual="/foo/bar.footer" -->
+
+  would be
+
+    $ssi->include(virtual => '/foo/bar.footer');
+
+likewise,
+
+    <!--#exec cgi="/cgi-bin/foo.cgi" -->
+
+  would be
+
+    $ssi->exec(cgi => '/cgi-bin/foo.cgi');
+
+Usually, if there's no chance for ambiguity, the first argument may 
+be left out:
+
+    <!--#echo var="var_name" -->
+
+  could be either
+
+    $ssi->echo(var => 'var_name');
+
+  or
+
+    $ssi->echo('var_name');
+
+Likewise,
+
+    $ssi->set(var => $varname, value => $value)
+
+  is the same as 
+
+    $ssi->set($varname => $value)
 
 =over 4
 
-=item $ssi = CGI::SSI->new()
+=item $ssi->new([%args])
 
-Creates a new CGI::SSI object.
+Creates a new CGI::SSI object. The following are valid (optional) arguments: 
 
-=item $ssi->config($type, $argument) 
+ DOCUMENT_URI    => $doc_uri,
+ DOCUMENT_NAME   => $doc_name,
+ errmsg          => $oops,
+ sizefmt         => ('bytes' || 'abbrev'),
+ timefmt         => $time_fmt,
 
-$type is either 'errmsg','timefmt', or 'sizefmt'. Valid values for 
-$argument depend on $type:
+=item $ssi->config($type, $arg)
 
-errmsg - Any string. Defaults to '[an error occurred while 
-            processing this directive]'.
+$type is either 'sizefmt', 'timefmt', or 'errmsg'. $arg is similar to 
+those of the SSI C<spec>, referenced below.
 
-timefmt - A valid first argument to 
-            Date::Format::strftime(). Defaults to 
-            'scalar localtime()'.
+=item $ssi->set($varname => $value)
 
-sizefmt - 'bytes' or 'abbrev'. Default is 'abbrev'.
+Sets variables internal to the CGI::SSI object. (Not to be confused 
+with the normal variables your script uses.) These variables may be used 
+in test expressions, and retreived using $ssi->echo($varname).
 
 =item $ssi->echo($varname)
 
-Returns the value of $varname.
+Returns the value of the variable named $varname. Such variables may 
+be set manually using the C<set()> method. There are also several built-in 
+variables:
 
-=item $ssi->exec($type, $resource) 
+ DOCUMENT_URI  - the URI of this document
+ DOCUMENT_NAME - the name of the current document
+ DATE_GMT      - the same as 'gmtime'
+ DATE_LOCAL    - the same as 'localtime'
+ FLASTMOD      - the last time this script was modified
 
-$type may be 'cmd' or 'cgi'. $resource is either an absolute or 
-relative filename.
+=item $ssi->exec($type, $arg)
 
-=item $ssi->flastmod($type, $resource)
+$type is either 'cmd' or 'cgi'. $arg is similar to the SSI C<spec> 
+(see below).
 
-$type is either 'file' or 'virtual'. $resource is either a relative
-or absolute filename.
+=item $ssi->include($type, $arg)
 
-=item $ssi->fsize($type, $resource)
+Same as C<exec>.
 
-Arguments are identical to those of flastmod().
+=item $ssi->flastmod($type, $filename)
 
-=item $ssi->include($type, $resource)
+$type is either 'file' or 'virtual'. $arg is similar to the SSI C<spec> 
+(see below).
 
-Arguments are identical to those of exec().
+=item $ssi->fsize($type, $filename)
 
-=item $ssi->printenv()
+Same as C<flastmod>.
 
-Returns a listing of the environment variable names and their values.
+=item $ssi->printenv
 
-=item $ssi->set($varname, $value)
-
-Associate a value with a variable.
+Returns the environment similar to Apache's mod_include.
 
 =back
 
-=head2 FLOW CONTROL METHODS
+=back
 
-The following methods may be used for flow-control. During a `block' where
-the test $expr was false, nothing will be returned (or printed, if tied).
+=head2 FLOW-CONTROL METHODS
+
+The following methods may be used to test expressions. During a C<block> 
+where the test $expr is false, nothing will be returned (or printed, 
+if tied).
 
 =over 4
 
 =item $ssi->if($expr)
 
-If $expr is excluded, it's considered to be false.
-
 =item $ssi->elif($expr)
 
-If $expr is excluded, it's considered to be false.
+=item $ssi->else
 
-=item $ssi->else()
-
-=item $ssi->endif()
+=item $ssi->endif
 
 =back
 
 =head1 SEE ALSO
 
-Apache::SSI and the SSI 'spec' at: 
+C<Apache::SSI> and the SSI C<spec> at
 http://www.apache.org/docs/mod/mod_include.html
 
 =head1 COPYRIGHT
 
-Copyright 1999 James Tolley   All Rights Reserved.
+Copyright 2000 James Tolley   All Rights Reserved.
 
-This is free software. You may copy and/or modify it under 
+This is free software. You may copy and/or modify it under
 the same terms as perl itself.
 
 =head1 AUTHOR

@@ -3,3 +3,6 @@ Revision history for Perl extension CGI::SSI.
 0.01  Fri Jan 14 21:45:28 2000
 	- original version; created by h2xs 1.19
 
+0.10  Thu May 18 12:01:02 2000
+	- various bug fixes; a total overhaul, as a
+		matter of fact.
