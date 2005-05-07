@@ -1,7 +1,10 @@
 use strict;
 use warnings FATAL => 'all';
 
-use Test::More tests => 21;
+use Test::More tests => 24;
+
+use List::Util qw(sum);
+use File::Temp qw(tempfile);
 
 use_ok('CGI::SSI');
 
@@ -92,7 +95,17 @@ use_ok('CGI::SSI');
 {
     my $ssi = CGI::SSI->new();
     my $html = $ssi->process(q[<!--#include virtual="http://www.yahoo.com" -->]);
-    ok($html =~ /yahoo/i,'include virtual');
+    ok($html =~ /yahoo/i && $html =~ /mail/i,'include virtual 1');
+}
+
+    # tough to do these well, without more info...
+# include file - with many types of input
+# include virtual - with different types of input
+
+{
+    my $ssi = CGI::SSI->new(DOCUMENT_ROOT => '.');
+    my $html = $ssi->process(q[<!--#include virtual="/MANIFEST" -->]);
+    ok($html =~ /Changes/i,'include virtual 2');
 }
 
 # exec cgi - with different input
@@ -196,7 +209,7 @@ use_ok('CGI::SSI');
     @CGI::SSI::UCEcho::ISA = qw(CGI::SSI);
 
     sub echo {
-	return uc shift->SUPER::echo(@_);
+		return uc shift->SUPER::echo(@_);
     }
 
     package main;
@@ -212,6 +225,36 @@ use_ok('CGI::SSI');
     ok($ssi->echo('DATE_LOCAL') =~ /^\d{4}$/,'config{timefmt}');
 }
 
+# check recursion test
+SKIP: {
+		# create tempfile to hold include directive
+    my($fh,$filename) = tempfile();
+    skip("Failed to create tempfile: $!",1) unless $filename;
+	$filename =~ s/\\/\\\\/g;
+	print $fh qq[<!--#include file="$filename"-->];
+	close $fh;
+	
+	my $ssi = CGI::SSI->new(MAX_RECURSIONS => 42);
+	my $html = $ssi->include(file => $filename);
+	ok($html eq $ssi->{_config}->{errmsg}
+		&& (
+			sum(values %{$ssi->{_recursions}}) == 43 
+			||
+			sum(values %{$ssi->{_recursions}}) == 42
+		   )
+		, "recursion check");
+}
+
+# test cookie support
+SKIP: {
+	eval "use HTTP::Cookies; 1" or skip("HTTP::Cookies not installed", 1);
+	my $jar = HTTP::Cookies->new({});
+	$jar->set_cookie(1,'mycookie','COOKIEVAL','/','www.bitperfect.com',80,0,0,100);
+
+	my $ssi = CGI::SSI->new(COOKIE_JAR => $jar);
+	my $html = $ssi->process(qq[<!--#include virtual="http://www.bitperfect.com/cgi-bin/cgi-ssi/cookietest.cgi"-->]);
+	ok($html =~ m'"?COOKIEVAL"?', "cookie support");
+}
 
 # autotie ?
 # tie by hand

@@ -1,5 +1,11 @@
 Revision history for Perl extension CGI::SSI.
 
+0.84  Thu May 05 2005
+        - added cookie support
+
+0.83  Thu May 05 2005
+        - added support for high recursion test
+
 0.82  Tue Feb 15 2005
         - config timefmt fix for DATE_LOCAL and DATE_GMT
 

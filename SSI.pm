@@ -4,14 +4,15 @@ use strict;
 use HTML::SimpleParse;
 use File::Spec::Functions; # catfile()
 use FindBin;
-use LWP::Simple;
+use LWP::UserAgent;
+use HTTP::Response;
+use HTTP::Cookies;
 use URI;
 use Date::Format;
-use Tie::Scalar;
 
-$CGI::SSI::VERSION = '0.82';
+$CGI::SSI::VERSION = '0.84';
 
-my $debug = 0;
+our $DEBUG = 0;
 
 sub import {
     my($class,%args) = @_;
@@ -32,7 +33,7 @@ sub new {
 
     my $script_name = '';
     if(exists $ENV{'SCRIPT_NAME'}) {
-	($script_name) = $ENV{'SCRIPT_NAME'} =~ /([^\/]+)$/;
+		($script_name) = $ENV{'SCRIPT_NAME'} =~ /([^\/]+)$/;
     }
 
     tie $gmt, 'CGI::SSI::Gmt', $self;
@@ -45,7 +46,7 @@ sub new {
         DATE_LOCAL      =>  $loc,
         LAST_MODIFIED   =>  $self->flastmod('file', $ENV{'SCRIPT_FILENAME'} || $ENV{'PATH_TRANSLATED'} || ''),
         DOCUMENT_NAME   =>  ($args{'DOCUMENT_NAME'} || $script_name),
-	DOCUMENT_ROOT   =>  ($args{'DOCUMENT_ROOT'} || $ENV{DOCUMENT_ROOT}),
+		DOCUMENT_ROOT   =>  ($args{'DOCUMENT_ROOT'} || $ENV{DOCUMENT_ROOT}),
                                 };
 
     $self->{'_config'}        = {
@@ -53,6 +54,11 @@ sub new {
         sizefmt =>  ($args{'sizefmt'} || 'abbrev'),
         timefmt =>  ($args{'timefmt'} ||  undef),
                                 };
+
+	$self->{_max_recursions} = $args{MAX_RECURSIONS} || 100; # no "infinite" loops
+	$self->{_recursions} = {};
+
+	$self->{_cookie_jar}  = $args{COOKIE_JAR} || HTTP::Cookies->new({});
 
     $self->{'_in_if'}     = 0;
     $self->{'_suspend'}   = [0];
@@ -95,10 +101,10 @@ sub process {
 #	next unless(defined $token and length $token);
         if($token =~ /^<!--#(.+?)\s*-->$/) {
             $processed .= $self->_process_ssi_text($self->_interp_vars($1));
-	} else {
-            next if $self->_suspended;
-	    $processed .= $token;
-	}
+		} else {
+	        next if $self->_suspended;
+		    $processed .= $token;
+		}
     }
     return $processed;
 }
@@ -127,9 +133,9 @@ sub _echo {
     $var = $key if @_ == 2;
 
     if($var eq 'DATE_LOCAL') {
-	return $loc;
+		return $loc;
     } elsif($var eq 'DATE_GMT') {
-	return $gmt;
+		return $gmt;
     }
 
     return $self->{'_variables'}->{$var} if exists $self->{'_variables'}->{$var};
@@ -144,19 +150,19 @@ sub _echo {
 sub config {
     my($self,$type,$value) = @_;
     if($type =~ /^timefmt$/i) {
-	$self->{'_config'}->{'timefmt'} = $value;
+		$self->{'_config'}->{'timefmt'} = $value;
     } elsif($type =~ /^sizefmt$/i) {
-	if(lc $value eq 'abbrev') {
-	    $self->{'_config'}->{'sizefmt'} = 'abbrev';
-	} elsif(lc $value eq 'bytes') {
-	    $self->{'_config'}->{'sizefmt'} = 'bytes';
-	} else {
-	    return $self->{'_config'}->{'errmsg'};
-	}
+		if(lc $value eq 'abbrev') {
+		    $self->{'_config'}->{'sizefmt'} = 'abbrev';
+		} elsif(lc $value eq 'bytes') {
+		    $self->{'_config'}->{'sizefmt'} = 'bytes';
+		} else {
+		    return $self->{'_config'}->{'errmsg'};
+		}
     } elsif($type =~ /^errmsg$/i) {
-	$self->{'_config'}->{'errmsg'} = $value;
+		$self->{'_config'}->{'errmsg'} = $value;
     } else {
-	return $self->{'_config'}->{'errmsg'};
+		return $self->{'_config'}->{'errmsg'};
     }
     return '';
 }
@@ -164,10 +170,10 @@ sub config {
 sub set {
     my($self,%args) = @_;
     if(scalar keys %args > 1) {
-	$self->{'_variables'}->{$args{'var'}} = $args{'value'};
+		$self->{'_variables'}->{$args{'var'}} = $args{'value'};
     } else { # var => value notation
-	my($var,$value) = %args;
-	$self->{'_variables'}->{$var} = $value;
+		my($var,$value) = %args;
+		$self->{'_variables'}->{$var} = $value;
     }
     return '';
 }
@@ -177,9 +183,9 @@ sub echo {
     $var = $key if @_ == 2;
 
     if($var eq 'DATE_LOCAL') {
-	return $loc;
+		return $loc;
     } elsif($var eq 'DATE_GMT') {
-	return $gmt;
+		return $gmt;
     }
 
     return $self->{'_variables'}->{$var} if exists $self->{'_variables'}->{$var};
@@ -189,17 +195,18 @@ sub echo {
 
 sub printenv {
     #my $self = shift;
-    return join "\n",map {"$_=$ENV{$_}"} keys %ENV; 
+    return join "\n",map {"$_=$ENV{$_}"} keys %ENV;
 }
 
 sub include {
+	$DEBUG and do { local $" = "','"; warn "DEBUG: include('@_')\n" };
     my($self,$type,$filename) = @_;
     if(lc $type eq 'file') {
-	return $self->_include_file($filename);
+		return $self->_include_file($filename);
     } elsif(lc $type eq 'virtual') {
-	return $self->_include_virtual($filename);
+		return $self->_include_virtual($filename);
     } else {
-	return $self->{'_config'}->{'errmsg'};
+		return $self->{'_config'}->{'errmsg'};
     }
 }
 
@@ -208,49 +215,47 @@ sub _include_file {
     $filename = catfile($FindBin::Bin,$filename) unless -e $filename;
     my $fh = do { local *STDIN };
     open($fh,$filename) or return $self->{'_config'}->{'errmsg'};
+    return $self->{'_config'}->{'errmsg'} if ++$self->{_recursions}->{$filename} >= $self->{_max_recursions};
     return $self->process(join '',<$fh>);
 }
 
 sub _include_virtual {
     my($self,$filename) = @_;
     if($filename =~ m|^/|) { # this is on the local server
-#
-# should never have put this in.
-#
-#	my($old_query_string,$old_unescaped_query_string);
-#       if($filename =~ s/\?(.+)$//) {
-#	    $ENV{QUERY_STRING} ||= '';           # ??
-#	    $old_query_string  = $ENV{QUERY_STRING};
-#	    $ENV{QUERY_STRING_UNESCAPED} ||= ''; # ??
-#	    $old_unescaped_query_string  = $ENV{QUERY_STRING_UNESCAPED};
-#	    $ENV{QUERY_STRING} = $1;
-#	    $ENV{QUERY_STRING_UNESCAPED} = uri_unescape($ENV{QUERY_STRING});
-#	}
-	my $response = $self->_include_file($self->{'_variables'}->{'DOCUMENT_ROOT'}.$filename);
-#	$ENV{QUERY_STRING} = $old_query_string;
-#	$ENV{QUERY_STRING_UNESCAPED} = $old_unescaped_query_string;
-	return $response;
+		my $file = -e $filename ? $filename : $self->{'_variables'}->{'DOCUMENT_ROOT'}.$filename; # TODO - NOT portable to Mac (et al)
+		return $self->_include_file($file);
     }
-    my $response = undef;
-    eval {
-	my $uri = URI->new($filename);
-	$uri->scheme($uri->scheme || 'http'); # ??
-	$uri->host($uri->host || $ENV{'HTTP_HOST'} || $ENV{'SERVER_NAME'});
-	$response = get $uri->canonical;
-    };
+
+    my $uri = eval {
+		my $uri = URI->new($filename);
+		$uri->scheme($uri->scheme || 'http'); # ??
+		$uri->host($uri->host || $ENV{'HTTP_HOST'} || $ENV{'SERVER_NAME'});
+		$uri;
+    } || return $self->{'_config'}->{'errmsg'};
     return $self->{'_config'}->{'errmsg'} if $@;
-    return $self->{'_config'}->{'errmsg'} unless defined $response;
-    return $self->process($response);
+
+	$self->{_ua} ||= $self->_get_ua();
+	my $response = $self->{_ua}->get($uri->canonical);
+	return $self->{_config}->{errmsg} unless $response->is_success;
+    return $self->{'_config'}->{'errmsg'} if ++$self->{_recursions}->{$filename} >= $self->{_max_recursions};
+    return $self->process($response->content);
+}
+
+sub _get_ua {
+	my $self = shift;
+	my $ua = LWP::UserAgent->new($ENV{HTTP_USER_AGENT} || ());
+	$ua->cookie_jar($self->{_cookie_jar});
+	return $ua;
 }
 
 sub exec {
     my($self,$type,$filename) = @_;
     if(lc $type eq 'cmd') {
-	return $self->_exec_cmd($filename);
+		return $self->_exec_cmd($filename);
     } elsif(lc $type eq 'cgi') {
-	return $self->_exec_cgi($filename);
+		return $self->_exec_cgi($filename);
     } else {
-	return $self->{'_config'}->{'errmsg'};
+		return $self->{'_config'}->{'errmsg'};
     }
 }
 
@@ -263,66 +268,69 @@ sub _exec_cmd {
 
 sub _exec_cgi { # no relative $filename allowed.
     my($self,$filename) = @_;
-    my $response = undef;
-    eval {
-	my $uri = URI->new($filename);
-	$uri->scheme($uri->scheme || 'http');
-	$uri->host($uri->host || $ENV{'HTTP_HOST'} || $ENV{'SERVER_NAME'});
-	$uri->query($uri->query || $ENV{'QUERY_STRING'});
-	$response = get $uri->canonical;
-    };
+
+	my $uri = eval {
+		my $uri = URI->new($filename);
+		$uri->scheme($uri->scheme || 'http'); # ??
+		$uri->host($uri->host || $ENV{'HTTP_HOST'} || $ENV{'SERVER_NAME'});
+		$uri->query($uri->query || $ENV{'QUERY_STRING'});
+		$uri;
+	} || return $self->{'_config'}->{'errmsg'};
     return $self->{'_config'}->{'errmsg'} if $@;
-    return $self->{'_config'}->{'errmsg'} unless defined $response;
-    return $self->process($response);
+    
+	$self->{_ua} ||= $self->_get_ua();
+	my $response = $self->{_ua}->get($uri->canonical);
+	return $self->{_config}->{errmsg} unless $response->is_success;
+    return $self->process($response->content);
 }
 
 sub flastmod {
     my($self,$type,$filename) = @_;
 
     if(lc $type eq 'file') {
-	$filename = catfile($FindBin::Bin,$filename) unless -e $filename;
+		$filename = catfile($FindBin::Bin,$filename) unless -e $filename;
     } elsif(lc $type eq 'virtual') {
-	$filename = catfile($self->{'_variables'}->{'DOCUMENT_ROOT'},$filename)
+		$filename = catfile($self->{'_variables'}->{'DOCUMENT_ROOT'},$filename)
 	    unless $filename =~ /$self->{'_variables'}->{'DOCUMENT_ROOT'}/;
     } else {
-	return $self->{'_config'}->{'errmsg'};
+		return $self->{'_config'}->{'errmsg'};
     }
     return $self->{'_config'}->{'errmsg'} unless -e $filename;
 
     my $flastmod = (stat $filename)[9];
     
     if($self->{'_config'}->{'timefmt'}) {
-	my @localtime = localtime($flastmod); # need this??
-	return Date::Format::strftime($self->{'_config'}->{'timefmt'},@localtime);
+		my @localtime = localtime($flastmod); # need this??
+		return Date::Format::strftime($self->{'_config'}->{'timefmt'},@localtime);
     } else {
-	return scalar localtime($flastmod);
+		return scalar localtime($flastmod);
     }
 }
 
 sub fsize {
     my($self,$type,$filename) = @_;
 
-    if(lc $type eq 'file') {
-	$filename = catfile($FindBin::Bin,$filename) unless -e $filename;
+	if(lc $type eq 'file') {
+		$filename = catfile($FindBin::Bin,$filename) unless -e $filename;
     } elsif(lc $type eq 'virtual') {
-	$filename = catfile($ENV{'DOCUMENT_ROOT'},$filename) unless $filename =~ /$ENV{'DOCUMENT_ROOT'}/;
+		$filename = catfile($ENV{'DOCUMENT_ROOT'},$filename) unless $filename =~ /$ENV{'DOCUMENT_ROOT'}/;
     } else {
-	return $self->{'_config'}->{'errmsg'};
+		return $self->{'_config'}->{'errmsg'};
     }
     return $self->{'_config'}->{'errmsg'} unless -e $filename;
 
     my $fsize = (stat $filename)[7];
     
     if(lc $self->{'_config'}->{'sizefmt'} eq 'bytes') {
-	1 while $fsize =~ s/^(\d+)(\d{3})/$1,$2/g;
-	return $fsize;
+		1 while $fsize =~ s/^(\d+)(\d{3})/$1,$2/g;
+		return $fsize;
     } else { # abbrev
-	# gratefully lifted from Apache::SSI
-	return "   0k" unless $fsize;
-	return "   1k" if $fsize < 1024;
-	return sprintf("%4dk", ($fsize + 512)/1024) if $fsize < 1048576;
-	return sprintf("%4.1fM", $fsize/1048576.0) if $fsize < 103809024;
-	return sprintf("%4dM", ($fsize + 524288)/1048576) if $fsize < 1048576;
+		# gratefully lifted from Apache::SSI
+		return "   0k" unless $fsize;
+		return "   1k" if $fsize < 1024;
+		return sprintf("%4dk", ($fsize + 512)/1024) if $fsize < 1048576;
+		return sprintf("%4.1fM", $fsize/1048576.0) if $fsize < 103809024;
+		return sprintf("%4dM", ($fsize + 524288)/1048576) if $fsize < 1048576;
     }
 }
 
@@ -372,7 +380,7 @@ sub _suspend {
 sub _resume {
     my $self = shift;
     $self->{'_suspend'}->[$self->{'_in_if'}]--
-	if $self->{'_suspend'}->[$self->{'_in_if'}];
+		if $self->{'_suspend'}->[$self->{'_in_if'}];
 }
 
 sub _in_if {
@@ -385,9 +393,9 @@ sub if {
     $expr = $test if @_ == 3;
     $self->_entering_if();
     if($self->_test($expr)) {
-	$self->_true();
+		$self->_true();
     } else {
-	$self->_suspend();
+		$self->_suspend();
     }
     return '';
 }
@@ -397,10 +405,10 @@ sub elif {
     die "Incorrect use of elif ssi directive: no preceeding 'if'." unless $self->_in_if();
     $expr = $test if @_ == 3;
     if(! $self->_seen_true() and $self->_test($expr)) {
-	$self->_true();
-	$self->_resume();
+		$self->_true();
+		$self->_resume();
     } else {
-	$self->_suspend() unless $self->_suspended();
+		$self->_suspend() unless $self->_suspended();
     }
     return '';
 }
@@ -409,9 +417,9 @@ sub else {
     my $self = shift;
     die "Incorrect use of else ssi directive: no preceeding 'if'." unless $self->_in_if();
     unless($self->_seen_true()) {
-	$self->_resume();
+		$self->_resume();
     } else {
-	$self->_suspend();
+		$self->_suspend();
     }
     return '';
 }
@@ -434,10 +442,10 @@ sub TIESCALAR { bless [@_], shift() }
 sub FETCH {
     my $self = shift;
     if($self->[-1]->{'_config'}->{'timefmt'}) {
-	my @gt = gmtime;
-	return Date::Format::strftime($self->[-1]->{'_config'}->{'timefmt'},@gt);
+		my @gt = gmtime;
+		return Date::Format::strftime($self->[-1]->{'_config'}->{'timefmt'},@gt);
     } else {
-	return scalar gmtime;
+		return scalar gmtime;
     }
 }
 
@@ -447,10 +455,10 @@ sub TIESCALAR { bless [@_], shift() }
 sub FETCH {
     my $self = shift;
     if($self->[-1]->{'_config'}->{'timefmt'}) {
-	my @lt = localtime;
-	return Date::Format::strftime($self->[-1]->{'_config'}->{'timefmt'},@lt);
+		my @lt = localtime;
+		return Date::Format::strftime($self->[-1]->{'_config'}->{'timefmt'},@lt);
     } else {
-	return scalar localtime;
+		return scalar localtime;
     }
 }
 
@@ -585,6 +593,8 @@ Creates a new CGI::SSI object. The following are valid (optional) arguments:
  errmsg          => $oops,
  sizefmt         => ('bytes' || 'abbrev'),
  timefmt         => $time_fmt,
+ MAX_RECURSIONS  => $default_100, # when to stop infinite loops w/ error msg
+ COOKIE_JAR      => HTTP::Cookies->new,
 
 =item $ssi->config($type, $arg)
 
@@ -629,6 +639,12 @@ Same as C<flastmod>.
 =item $ssi->printenv
 
 Returns the environment similar to Apache's mod_include.
+
+=item $ssi->cookie_jar([$jar])
+
+Returns the currently-used HTTP::Cookies object. You may optionally
+pass in a new HTTP::Cookies object. The jar is used for web requests
+in exec cgi and include virtual directives.
 
 =back
 
