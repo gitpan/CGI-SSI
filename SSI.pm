@@ -10,7 +10,7 @@ use HTTP::Cookies;
 use URI;
 use Date::Format;
 
-$CGI::SSI::VERSION = '0.84';
+$CGI::SSI::VERSION = '0.85';
 
 our $DEBUG = 0;
 
@@ -246,6 +246,14 @@ sub _get_ua {
 	my $ua = LWP::UserAgent->new($ENV{HTTP_USER_AGENT} || ());
 	$ua->cookie_jar($self->{_cookie_jar});
 	return $ua;
+}
+
+sub cookie_jar {
+	my $self = shift;
+	if(my $jar = shift) {
+		$self->{_cookie_jar} = $jar;
+	}
+	return $self->{_cookie_jar};
 }
 
 sub exec {
