@@ -50,7 +50,7 @@ use_ok('CGI::SSI');
 			    DOCUMENT_ROOT => "/",
 			    errmsg        => "[ERROR!]",
 			    sizefmt       => "bytes",
-                            timefmt       => "%B",
+                timefmt       => "%B",
 			    );
     ok(   ($ssi->echo("DOCUMENT_URI")  eq "doc_uri"
        and $ssi->echo("DOCUMENT_NAME") eq "doc_name"
@@ -253,7 +253,7 @@ SKIP: {
 
 	my $ssi = CGI::SSI->new(COOKIE_JAR => $jar);
 	my $html = $ssi->process(qq[<!--#include virtual="http://www.bitperfect.com/cgi-bin/cgi-ssi/cookietest.cgi"-->]);
-	ok($html =~ m'"?COOKIEVAL"?', "cookie support");
+	ok($html =~ m'COOKIEVAL', "cookie support");
 }
 
 # autotie ?

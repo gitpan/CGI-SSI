@@ -10,7 +10,7 @@ use HTTP::Cookies;
 use URI;
 use Date::Format;
 
-$CGI::SSI::VERSION = '0.85';
+$CGI::SSI::VERSION = '0.86';
 
 our $DEBUG = 0;
 
@@ -211,6 +211,7 @@ sub include {
 }
 
 sub _include_file {
+	$DEBUG and do { local $" = "','"; warn "DEBUG: _include_file('@_')\n" };
     my($self,$filename) = @_;
     $filename = catfile($FindBin::Bin,$filename) unless -e $filename;
     my $fh = do { local *STDIN };
@@ -220,16 +221,25 @@ sub _include_file {
 }
 
 sub _include_virtual {
+	$DEBUG and do { local $" = "','"; warn "DEBUG: _include_virtual('@_')\n" };
     my($self,$filename) = @_;
-    if($filename =~ m|^/|) { # this is on the local server
-		my $file = -e $filename ? $filename : $self->{'_variables'}->{'DOCUMENT_ROOT'}.$filename; # TODO - NOT portable to Mac (et al)
-		return $self->_include_file($file);
+    # if this is a local file that we can just read, let's do that instead of getting it virtually
+    if($filename =~ m|^/(.+)|) { # could be on the local server: absolute filename, relative to ., relative to $ENV{DOCUMENT_ROOT}
+		my $file = $1;
+		if(-e '/'.$file) { # back to the original
+			$file = '/'.$file;
+		} elsif(-e catfile($self->{'_variables'}->{'DOCUMENT_ROOT'},$file)) {
+			$file = catfile($self->{'_variables'}->{'DOCUMENT_ROOT'},$file);
+		} elsif(-e catfile($FindBin::Bin,$file)) {
+			$file = atfile($FindBin::Bin,$file);
+		}
+		return $self->_include_file($file) if -e $file;
     }
 
     my $uri = eval {
 		my $uri = URI->new($filename);
 		$uri->scheme($uri->scheme || 'http'); # ??
-		$uri->host($uri->host || $ENV{'HTTP_HOST'} || $ENV{'SERVER_NAME'});
+		$uri->host($uri->host || $ENV{'HTTP_HOST'} || $ENV{'SERVER_NAME'} || 'localhost');
 		$uri;
     } || return $self->{'_config'}->{'errmsg'};
     return $self->{'_config'}->{'errmsg'} if $@;
@@ -441,6 +451,34 @@ sub endif {
 }
 
 #
+# if we're called like this, it means that we're to handle a CGI request ourselves.
+# that means that we're to open the file and process the content, sending it to STDOUT
+# along with a standard HTTP content header
+#
+unless(caller) {
+	goto &handler;
+}
+
+sub handler {
+	eval "use CGI qw(:standard);";
+	print header();
+
+	unless(UNIVERSAL::isa(tied(*STDOUT),'CGI::SSI')) {
+		tie *STDOUT, 'CGI::SSI', filehandle => 'main::STDOUT';
+	}
+
+	my $filename = "$ENV{DOCUMENT_ROOT}$ENV{REQUEST_URI}";
+	if(-f $filename) {
+		open my $fh, '<', $filename or die "Failed to open file ($filename): $!";
+		print <$fh>;
+	} else {
+		print "Failed to find file ($filename).";
+	}
+
+	exit;
+}
+
+#
 # packages for tie()
 #
 
@@ -524,6 +562,22 @@ __END__
       return $html;
    }
    1;
+   __END__
+
+ #
+ # or use .htaccess to include all files in a dir
+ #
+
+   # in .htaccess
+   Action cgi-ssi /cgi-bin/ssi/process.cgi
+   <FilesMatch "\.shtml">
+      SetHandler cgi-ssi
+   </FilesMatch>
+   
+   # in /cgi-bin/ssi/process.cgi
+   #!/usr/local/bin/perl 
+   use CGI::SSI;
+   CGI::SSI->handler();
    __END__
 
 =head1 DESCRIPTION
