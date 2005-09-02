@@ -1,5 +1,8 @@
 Revision history for Perl extension CGI::SSI.
 
+0.87  Fri Sept 2 2005
+        - CLOSE
+
 0.86  Fri Jun 17 2005
         - virtual file w/ params bugfix
         - added default include virtual host 'localhost'

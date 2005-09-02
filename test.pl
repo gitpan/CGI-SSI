@@ -1,10 +1,10 @@
 use strict;
 use warnings FATAL => 'all';
 
-use Test::More tests => 24;
+use Test::More tests => 26;
 
 use List::Util qw(sum);
-use File::Temp qw(tempfile);
+use File::Temp qw(tempfile tempdir);
 
 use_ok('CGI::SSI');
 
@@ -256,8 +256,22 @@ SKIP: {
 	ok($html =~ m'COOKIEVAL', "cookie support");
 }
 
+SKIP: {
+	# tie by hand & close
+    my($dir) = tempdir();
+#	print $dir,"\n";
+	open FH, "+>$dir/AfDCSd43.tmp" or skip('failed to open tempfile',2);
+	my $ssi = tie *FH, 'CGI::SSI', filehandle => 'FH';
+	isa_ok(tied(*FH),'CGI::SSI','tied object');
+
+	print FH "this is the first test\n";
+
+	close FH;
+	eval { print FH "this is the second test\n" or die "FH is closed" };
+	ok($@ =~ /^FH is closed/,'close()');
+}
+
 # autotie ?
-# tie by hand
 
 
 __END__

@@ -10,7 +10,7 @@ use HTTP::Cookies;
 use URI;
 use Date::Format;
 
-$CGI::SSI::VERSION = '0.86';
+$CGI::SSI::VERSION = '0.87';
 
 our $DEBUG = 0;
 
@@ -90,6 +90,11 @@ sub PRINTF {
     my $self = shift;
     my $fmt  = shift;
     printf {$self->{'_handle'}} $fmt, map { $self->process($_) } @_;
+}
+
+sub CLOSE {
+	my($self) = @_;
+	close $self->{'_handle'};
 }
 
 sub process {
