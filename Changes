@@ -1,5 +1,9 @@
 Revision history for Perl extension CGI::SSI.
 
+0.88  Fri Sept 2 2005
+        - warn on errors
+        - https URIs
+
 0.87  Fri Sept 2 2005
         - CLOSE
 

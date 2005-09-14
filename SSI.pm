@@ -10,7 +10,7 @@ use HTTP::Cookies;
 use URI;
 use Date::Format;
 
-$CGI::SSI::VERSION = '0.87';
+$CGI::SSI::VERSION = '0.88';
 
 our $DEBUG = 0;
 
@@ -73,9 +73,9 @@ sub TIEHANDLE {
     $self->{'_handle'} = do { local *STDOUT };
     my $handle_to_tie = '';
     if($args{'filehandle'} !~ /::/) {
-	$handle_to_tie = caller().'::'.$args{'filehandle'};
+		$handle_to_tie = caller().'::'.$args{'filehandle'};
     } else {
-	$handle_to_tie = $args{'filehandle'};
+		$handle_to_tie = $args{'filehandle'};
     }
     open($self->{'_handle'},'>&'.$handle_to_tie) or die "Failed to copy the filehandle ($handle_to_tie): $!";
     return $self;
@@ -116,8 +116,15 @@ sub process {
 
 sub _process_ssi_text {
     my($self,$text) = @_;
+
+	# are we suspended?
     return '' if($self->_suspended and $text !~ /^(?:if|else|elif|endif)\b/);
-    return $self->{'_config'}->{'errmsg'} unless $text =~ s/^(\S+)\s*//;
+
+	# what's the first \S+?
+	if($text !~ s/^(\S+)\s*//) {
+		warn ref($self)." error: failed to find method name at beginning of string: '$text'.\n";
+	    return $self->{'_config'}->{'errmsg'};
+	}
     my $method = $1;
     return $self->$method( HTML::SimpleParse->parse_args($text) );
 }
@@ -162,11 +169,13 @@ sub config {
 		} elsif(lc $value eq 'bytes') {
 		    $self->{'_config'}->{'sizefmt'} = 'bytes';
 		} else {
+			warn ref($self)." error: value for sizefmt is '$value'. It must be 'abbrev' or 'bytes'.\n";
 		    return $self->{'_config'}->{'errmsg'};
 		}
     } elsif($type =~ /^errmsg$/i) {
 		$self->{'_config'}->{'errmsg'} = $value;
     } else {
+		warn ref($self)." error: arg to config is '$type'. It must be one of: 'timefmt', 'sizefmt', or 'errmsg'.\n";
 		return $self->{'_config'}->{'errmsg'};
     }
     return '';
@@ -211,6 +220,7 @@ sub include {
     } elsif(lc $type eq 'virtual') {
 		return $self->_include_virtual($filename);
     } else {
+		warn ref($self)." error: arg to include is '$type'. It must be one of: 'file' or 'virtual'.\n";
 		return $self->{'_config'}->{'errmsg'};
     }
 }
@@ -218,16 +228,31 @@ sub include {
 sub _include_file {
 	$DEBUG and do { local $" = "','"; warn "DEBUG: _include_file('@_')\n" };
     my($self,$filename) = @_;
+
+	# get the filename to open
     $filename = catfile($FindBin::Bin,$filename) unless -e $filename;
+
+	# if we've reached MAX_RECURSIONS for this filename, warn and return the error
+	if(++$self->{_recursions}->{$filename} >= $self->{_max_recursions}) {
+		warn ref($self)." error: the maximum number of 'include file' recursions has been exceeded for '$filename'.\n";
+	    return $self->{'_config'}->{'errmsg'};
+	}
+
+	# open the file, or warn and return an error
     my $fh = do { local *STDIN };
-    open($fh,$filename) or return $self->{'_config'}->{'errmsg'};
-    return $self->{'_config'}->{'errmsg'} if ++$self->{_recursions}->{$filename} >= $self->{_max_recursions};
+    open($fh,$filename) or do {
+		warn ref($self)." error: failed to open file ($filename): $!\n";
+		return $self->{'_config'}->{'errmsg'};
+    };
+
+	# process the included file and return the result
     return $self->process(join '',<$fh>);
 }
 
 sub _include_virtual {
 	$DEBUG and do { local $" = "','"; warn "DEBUG: _include_virtual('@_')\n" };
     my($self,$filename) = @_;
+
     # if this is a local file that we can just read, let's do that instead of getting it virtually
     if($filename =~ m|^/(.+)|) { # could be on the local server: absolute filename, relative to ., relative to $ENV{DOCUMENT_ROOT}
 		my $file = $1;
@@ -241,18 +266,40 @@ sub _include_virtual {
 		return $self->_include_file($file) if -e $file;
     }
 
+	# create the URI to get(), or warn and return the error
     my $uri = eval {
 		my $uri = URI->new($filename);
-		$uri->scheme($uri->scheme || 'http'); # ??
+		$uri->scheme($uri->scheme || ($ENV{HTTPS} ? 'https' : 'http')); # ??
 		$uri->host($uri->host || $ENV{'HTTP_HOST'} || $ENV{'SERVER_NAME'} || 'localhost');
 		$uri;
-    } || return $self->{'_config'}->{'errmsg'};
-    return $self->{'_config'}->{'errmsg'} if $@;
+    } or do {
+    	warn ref($self)." error: failed to create a URI based on '$filename'.\n";
+    	return $self->{'_config'}->{'errmsg'};
+    };
+	if($@) {
+    	warn ref($self)." error: failed to create a URI based on '$filename'.\n";
+	    return $self->{'_config'}->{'errmsg'} if $@;
+	}
 
+	# get the content of the request
 	$self->{_ua} ||= $self->_get_ua();
-	my $response = $self->{_ua}->get($uri->canonical);
-	return $self->{_config}->{errmsg} unless $response->is_success;
-    return $self->{'_config'}->{'errmsg'} if ++$self->{_recursions}->{$filename} >= $self->{_max_recursions};
+	my $url = $uri->canonical;
+
+	# have we reached MAX_RECURSIONS?
+	if(++$self->{_recursions}->{$url} >= $self->{_max_recursions}) {
+		warn ref($self)." error: the maximum number of 'include virtual' recursions has been exceeded for '$url'.\n";
+	    return $self->{'_config'}->{'errmsg'};
+	}
+
+	my $response = $self->{_ua}->get($url);
+
+	# is it a success?
+	unless($response->is_success) {
+    	warn ref($self)." error: failed to get('$url'): ".$response->status_line.".\n";
+		return $self->{_config}->{errmsg};
+	}
+
+	# process the included content and return the result
     return $self->process($response->content);
 }
 
@@ -278,32 +325,69 @@ sub exec {
     } elsif(lc $type eq 'cgi') {
 		return $self->_exec_cgi($filename);
     } else {
+    	warn ref($self)." error: arg to exec() is '$type'. It must be one of: 'cmd' or 'cgi'.\n";
 		return $self->{'_config'}->{'errmsg'};
     }
 }
 
 sub _exec_cmd {
     my($self,$filename) = @_;
+
+	# have we reached MAX_RECURSIONS?
+	if(++$self->{_recursions}->{$filename} >= $self->{_max_recursions}) {
+		warn ref($self)." error: the maximum number of 'exec cmd' recursions has been exceeded for '$filename'.\n";
+	    return $self->{'_config'}->{'errmsg'};
+	}
+
     my $output = `$filename`; # security here is mighty bad.
-    return $self->{'_config'}->{'errmsg'} if $?;
+
+	# was the command a success?
+	if($?) {
+    	warn ref($self)." error: `$filename` was not successful.\n";
+	    return $self->{'_config'}->{'errmsg'};
+	}
+
+	# process the output, and return the result
     return $self->process($output);
 }
 
 sub _exec_cgi { # no relative $filename allowed.
     my($self,$filename) = @_;
 
+	# have we reached MAX_RECURSIONS?
+	if(++$self->{_recursions}->{$filename} >= $self->{_max_recursions}) {
+		warn ref($self)." error: the maximum number of 'exec cgi' recursions has been exceeded for '$filename'.\n";
+	    return $self->{'_config'}->{'errmsg'};
+	}
+
+	# create the URI from the filename
 	my $uri = eval {
 		my $uri = URI->new($filename);
-		$uri->scheme($uri->scheme || 'http'); # ??
+		$uri->scheme($uri->scheme || ($ENV{HTTPS} ? 'https' : 'http')); # ??
 		$uri->host($uri->host || $ENV{'HTTP_HOST'} || $ENV{'SERVER_NAME'});
 		$uri->query($uri->query || $ENV{'QUERY_STRING'});
 		$uri;
-	} || return $self->{'_config'}->{'errmsg'};
-    return $self->{'_config'}->{'errmsg'} if $@;
+	} or do {
+    	warn ref($self)." error: failed to create a URI from '$filename'.\n";
+		return $self->{'_config'}->{'errmsg'};
+	};
+	if($@) {
+    	warn ref($self)." error: failed to create a URI from '$filename'.\n";
+	    return $self->{'_config'}->{'errmsg'} if $@;
+	}
     
+	# get the content
 	$self->{_ua} ||= $self->_get_ua();
-	my $response = $self->{_ua}->get($uri->canonical);
-	return $self->{_config}->{errmsg} unless $response->is_success;
+	my $url = $uri->canonical;
+	my $response = $self->{_ua}->get($url);
+
+	# success?
+	unless($response->is_success) {
+    	warn ref($self)." error: failed to get('$filename').\n";
+		return $self->{_config}->{errmsg};
+	}
+
+	# process the content and return the result
     return $self->process($response->content);
 }
 
@@ -316,10 +400,14 @@ sub flastmod {
 		$filename = catfile($self->{'_variables'}->{'DOCUMENT_ROOT'},$filename)
 	    unless $filename =~ /$self->{'_variables'}->{'DOCUMENT_ROOT'}/;
     } else {
+    	warn ref($self)." error: the first argument to flastmod is '$type'. It must be one of: 'file' or 'virtual'.\n";
 		return $self->{'_config'}->{'errmsg'};
     }
-    return $self->{'_config'}->{'errmsg'} unless -e $filename;
-
+	unless(-e $filename) {
+    	warn ref($self)." error: flastmod failed to find '$filename'.\n";
+	    return $self->{'_config'}->{'errmsg'};
+	}
+	
     my $flastmod = (stat $filename)[9];
     
     if($self->{'_config'}->{'timefmt'}) {
@@ -338,10 +426,14 @@ sub fsize {
     } elsif(lc $type eq 'virtual') {
 		$filename = catfile($ENV{'DOCUMENT_ROOT'},$filename) unless $filename =~ /$ENV{'DOCUMENT_ROOT'}/;
     } else {
+    	warn ref($self)." error: the first argument to fsize is '$type'. It must be one of: 'file' or 'virtual'.\n";
 		return $self->{'_config'}->{'errmsg'};
     }
-    return $self->{'_config'}->{'errmsg'} unless -e $filename;
-
+	unless(-e $filename) {
+    	warn ref($self)." error: fsize failed to find '$filename'.\n";
+	    return $self->{'_config'}->{'errmsg'};
+	}
+	
     my $fsize = (stat $filename)[7];
     
     if(lc $self->{'_config'}->{'sizefmt'} eq 'bytes') {
@@ -526,7 +618,7 @@ __END__
 
  # autotie STDOUT or any other open filehandle
 
-   use CGI::SSI (autotie => STDOUT);
+   use CGI::SSI (autotie => 'STDOUT');
 
    print $shtml; # browser sees resulting HTML
 

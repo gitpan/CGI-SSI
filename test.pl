@@ -83,7 +83,16 @@ use_ok('CGI::SSI');
     ok($size eq int $size,'config 2');
 
     $ssi->config(errmsg => "error"); # TODO combine config calls
+
+	# close STDERR for this test
+	open COPY,'>&STDERR' or die "no copy of STDERR: $!";
+	close STDERR;
+
+	# perform the test
     ok($ssi->flastmod("") eq "error",'config 3');
+
+	# re-open STDERR and continue
+	open STDERR,">&COPY" or die "no reassign to STDERR: $!";
 
     unlink $filename;
 }
@@ -235,6 +244,12 @@ SKIP: {
 	close $fh;
 	
 	my $ssi = CGI::SSI->new(MAX_RECURSIONS => 42);
+
+	# close STDERR for this test
+	open COPY,'>&STDERR' or die "no copy of STDERR: $!";
+	close STDERR;
+
+	# perform the test
 	my $html = $ssi->include(file => $filename);
 	ok($html eq $ssi->{_config}->{errmsg}
 		&& (
@@ -243,6 +258,11 @@ SKIP: {
 			sum(values %{$ssi->{_recursions}}) == 42
 		   )
 		, "recursion check");
+
+	# re-open STDERR and continue
+	open STDERR,">&COPY" or die "no reassign to STDERR: $!";
+
+
 }
 
 # test cookie support
