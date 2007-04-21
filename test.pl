@@ -1,7 +1,7 @@
 use strict;
 use warnings FATAL => 'all';
 
-use Test::More tests => 26;
+use Test::More tests => 27;
 
 use List::Util qw(sum);
 use File::Temp qw(tempfile tempdir);
@@ -289,6 +289,24 @@ SKIP: {
 	close FH;
 	eval { print FH "this is the second test\n" or die "FH is closed" };
 	ok($@ =~ /^FH is closed/,'close()');
+}
+
+{
+  # nested ifs
+  my $ssi = CGI::SSI->new();
+  my $html = $ssi->process(<<"");
+    <!--#if expr="0" -->
+      <!--#if expr="1" -->
+        yes
+      <!--#else -->
+        no
+      <!--#endif -->
+      no
+    <!--#else -->
+      yes
+    <!--#endif -->
+
+  ok($html =~ /^\s*yes\s*$/s,'nested ifs');
 }
 
 # autotie ?

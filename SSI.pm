@@ -10,7 +10,7 @@ use HTTP::Cookies;
 use URI;
 use Date::Format;
 
-$CGI::SSI::VERSION = '0.88';
+$CGI::SSI::VERSION = '0.89';
 
 our $DEBUG = 0;
 
@@ -543,7 +543,7 @@ sub endif {
     my $self = shift;
     die "Incorrect use of endif ssi directive: no preceeding 'if'." unless $self->_in_if();
     $self->_leaving_if();
-    $self->_resume() if $self->_suspended();
+#    $self->_resume() if $self->_suspended();
     return '';
 }
 

@@ -1,5 +1,9 @@
 Revision history for Perl extension CGI::SSI.
 
+0.89  Fri Apr 20 2007
+        - nested if errors fixed (with thanks to Colin Fine)
+        - fixed bad HTTP::Cookies arg
+
 0.88  Fri Sept 2 2005
         - warn on errors
         - https URIs

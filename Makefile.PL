@@ -11,6 +11,6 @@ WriteMakefile(
                          HTTP::Response    => 0,
                          HTTP::Cookies     => 0,
                          URI               => 0,
-                         Date::Parse       => 0,
+                         Date::Format      => 0,
                       },
 );
