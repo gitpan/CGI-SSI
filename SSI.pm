@@ -10,7 +10,7 @@ use HTTP::Cookies;
 use URI;
 use Date::Format;
 
-$CGI::SSI::VERSION = '0.89';
+$CGI::SSI::VERSION = '0.90';
 
 our $DEBUG = 0;
 
@@ -58,7 +58,7 @@ sub new {
 	$self->{_max_recursions} = $args{MAX_RECURSIONS} || 100; # no "infinite" loops
 	$self->{_recursions} = {};
 
-	$self->{_cookie_jar}  = $args{COOKIE_JAR} || HTTP::Cookies->new({});
+	$self->{_cookie_jar}  = $args{COOKIE_JAR} || HTTP::Cookies->new();
 
     $self->{'_in_if'}     = 0;
     $self->{'_suspend'}   = [0];
