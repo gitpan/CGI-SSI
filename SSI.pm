@@ -10,7 +10,7 @@ use HTTP::Cookies;
 use URI;
 use Date::Format;
 
-$CGI::SSI::VERSION = '0.90';
+our $VERSION = '0.91';
 
 our $DEBUG = 0;
 
@@ -23,7 +23,7 @@ sub import {
     return $self;
 }
 
-my($gmt,$loc);
+my($gmt,$loc,$lmod);
 
 sub new {
     my($class,%args) = @_;
@@ -38,15 +38,16 @@ sub new {
 
     tie $gmt, 'CGI::SSI::Gmt', $self;
     tie $loc, 'CGI::SSI::Local', $self;
+    tie $lmod, 'CGI::SSI::LMOD', $self;
 
     $ENV{'DOCUMENT_ROOT'} ||= '';
     $self->{'_variables'}     = {
         DOCUMENT_URI    =>  ($args{'DOCUMENT_URI'} || $ENV{'SCRIPT_NAME'}),
         DATE_GMT        =>  $gmt,
         DATE_LOCAL      =>  $loc,
-        LAST_MODIFIED   =>  $self->flastmod('file', $ENV{'SCRIPT_FILENAME'} || $ENV{'PATH_TRANSLATED'} || ''),
+        LAST_MODIFIED   =>  $lmod,
         DOCUMENT_NAME   =>  ($args{'DOCUMENT_NAME'} || $script_name),
-		DOCUMENT_ROOT   =>  ($args{'DOCUMENT_ROOT'} || $ENV{DOCUMENT_ROOT}),
+        DOCUMENT_ROOT   =>  ($args{'DOCUMENT_ROOT'} || $ENV{DOCUMENT_ROOT}),
                                 };
 
     $self->{'_config'}        = {
@@ -148,6 +149,8 @@ sub _echo {
 		return $loc;
     } elsif($var eq 'DATE_GMT') {
 		return $gmt;
+    } elsif($var eq 'LAST_MODIFIED') {
+		return $lmod;
     }
 
     return $self->{'_variables'}->{$var} if exists $self->{'_variables'}->{$var};
@@ -200,6 +203,8 @@ sub echo {
 		return $loc;
     } elsif($var eq 'DATE_GMT') {
 		return $gmt;
+    } elsif($var eq 'LAST_MODIFIED') {
+		return $lmod;
     }
 
     return $self->{'_variables'}->{$var} if exists $self->{'_variables'}->{$var};
@@ -305,7 +310,9 @@ sub _include_virtual {
 
 sub _get_ua {
 	my $self = shift;
-	my $ua = LWP::UserAgent->new($ENV{HTTP_USER_AGENT} || ());
+	my %conf = ();
+	$conf{agent} = $ENV{HTTP_USER_AGENT} if $ENV{HTTP_USER_AGENT};
+	my $ua = LWP::UserAgent->new(%conf);
 	$ua->cookie_jar($self->{_cookie_jar});
 	return $ua;
 }
@@ -407,9 +414,9 @@ sub flastmod {
     	warn ref($self)." error: flastmod failed to find '$filename'.\n";
 	    return $self->{'_config'}->{'errmsg'};
 	}
-	
+
     my $flastmod = (stat $filename)[9];
-    
+
     if($self->{'_config'}->{'timefmt'}) {
 		my @localtime = localtime($flastmod); # need this??
 		return Date::Format::strftime($self->{'_config'}->{'timefmt'},@localtime);
@@ -605,6 +612,13 @@ sub FETCH {
     }
 }
 
+package CGI::SSI::LMOD;
+
+sub TIESCALAR { bless [@_], shift() }
+sub FETCH {
+    my $self = shift;
+	return $self->[-1]->flastmod('file', $ENV{'SCRIPT_FILENAME'} || $ENV{'PATH_TRANSLATED'} || '');
+}
 
 1;
 __END__
@@ -764,7 +778,8 @@ those of the SSI C<spec>, referenced below.
 
 Sets variables internal to the CGI::SSI object. (Not to be confused 
 with the normal variables your script uses!) These variables may be used 
-in test expressions, and retreived using $ssi->echo($varname).
+in test expressions, and retreived using $ssi->echo($varname). These
+variables also will not be available in external, included resources.
 
 =item $ssi->echo($varname)
 
@@ -776,7 +791,7 @@ variables:
  DOCUMENT_NAME - the name of the current document
  DATE_GMT      - the same as 'gmtime'
  DATE_LOCAL    - the same as 'localtime'
- FLASTMOD      - the last time this script was modified
+ LAST_MODIFIED - the last time this script was modified
 
 =item $ssi->exec($type, $arg)
 
@@ -786,6 +801,9 @@ $type is either 'cmd' or 'cgi'. $arg is similar to the SSI C<spec>
 =item $ssi->include($type, $arg)
 
 Similar to C<exec>, but C<virtual> and C<file> are the two valid types.
+SSI variables will not be available outside of your CGI::SSI object, 
+regardless of whether the virtual resource is on the local system or
+a remote system.
 
 =item $ssi->flastmod($type, $filename)
 

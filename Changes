@@ -1,5 +1,10 @@
 Revision history for Perl extension CGI::SSI.
 
+0.91  Mon May 28 2007
+        - fixed bad LWP::UserAgent arg
+		- added documentation to make the scope of SSI variables more clear.
+		- timefmt applied to LAST_MODIFIED
+
 0.90  Tue Apr 24 2007
         - fixed bad HTTP::Cookies arg
 

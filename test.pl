@@ -1,7 +1,7 @@
 use strict;
 use warnings FATAL => 'all';
 
-use Test::More tests => 27;
+use Test::More tests => 28;
 
 use List::Util qw(sum);
 use File::Temp qw(tempfile tempdir);
@@ -307,6 +307,14 @@ SKIP: {
     <!--#endif -->
 
   ok($html =~ /^\s*yes\s*$/s,'nested ifs');
+}
+
+{
+  # timefmt applied to LAST_MODIFIED
+  my $ssi = CGI::SSI->new();
+  my $html = $ssi->process('<!--#config timefmt="%m/%d/%Y %X" --><!--#echo var="LAST_MODIFIED" -->');
+
+  like($html, qr{^\d\d/\d\d/\d{4} \d\d:\d\d:\d\d$}, 'timefmt applied to LAST_MODIFIED');
 }
 
 # autotie ?
