@@ -215,7 +215,7 @@ SEE ALSO
     http://www.apache.org/docs/mod/mod_include.html
 
 AUTHOR
-    (c) 2000-2005 James Tolley <james@bitperfect.com> All Rights Reserved.
+    (c) 2000-2007 James Tolley <james@bitperfect.com> All Rights Reserved.
 
     This is free software. You may copy and/or modify it under the same
     terms as perl itself.

@@ -10,7 +10,7 @@ use HTTP::Cookies;
 use URI;
 use Date::Format;
 
-our $VERSION = '0.91';
+our $VERSION = '0.92';
 
 our $DEBUG = 0;
 
@@ -101,11 +101,11 @@ sub CLOSE {
 sub process {
     my($self,@shtml) = @_;
     my $processed = '';
-    @shtml = split(/(<!--#.+?-->)/,join '',@shtml);
+    @shtml = split(/(<!--#.+?-->)/s,join '',@shtml);
     local($HTML::SimpleParse::FIX_CASE) = 0; # prevent var => value from becoming VAR => value
     for my $token (@shtml) {
 #	next unless(defined $token and length $token);
-        if($token =~ /^<!--#(.+?)\s*-->$/) {
+        if($token =~ /^<!--#(.+?)\s*-->$/s) {
             $processed .= $self->_process_ssi_text($self->_interp_vars($1));
 		} else {
 	        next if $self->_suspended;
@@ -875,4 +875,4 @@ the same terms as perl itself.
 
 =head1 CREDITS
 
-Many Thanks to Corey Wilson for a bug report and fix.
+Many Thanks to Corey Wilson and Fitz Elliot for bug reports and fixes.
